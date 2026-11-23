@@ -1,0 +1,23 @@
+{
+  "description": "Every catalog offer matching each term, extracted from the full snapshot for deterministic tests.",
+  "sourceSha256": "8fdef66b4f77b164b30754c406a8470f96f60ed1fad8509c60bf3081dc1991c4",
+  "sourceRecords": 31330,
+  "records": 1037,
+  "terms": {
+    "חלב": 392,
+    "ביצים": 62,
+    "לחם": 250,
+    "מוצרלה": 76,
+    "קמח": 176,
+    "שמרים": 46,
+    "רוטב עגבניות": 46,
+    "רוטב פיצה": 6,
+    "בצק לפיצה": 1
+  },
+  "codes": [
+    "7290110563462",
+    "7290013121028",
+    "7290000554600"
+  ],
+  "createdAt": "2026-11-19T13:19:44.077Z"
+}

@@ -1,0 +1,52 @@
+{
+  "name": "smartcart",
+  "version": "2.0.0",
+  "private": true,
+  "description": "SmartCart: an AI grocery shopping agent for Israeli supermarkets (Next.js, Gemini function calling, MongoDB Atlas).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:engine && npm run test:unit",
+    "test:engine": "node --test tests/engine/*.test.mjs",
+    "test:unit": "node --import tsx --test \"tests/unit/**/*.test.ts\" \"tests/agent/**/*.test.ts\"",
+    "test:db": "node --import tsx --test --test-concurrency=1 \"tests/database/**/*.test.ts\" \"tests/integration/**/*.test.ts\"",
+    "test:e2e": "node --import tsx --test --test-concurrency=1 \"tests/e2e/**/*.test.ts\"",
+    "test:all": "npm test && npm run test:db",
+    "db:indexes": "tsx scripts/create-indexes.ts",
+    "db:migrate": "tsx scripts/migrate-products.ts",
+    "db:verify": "tsx scripts/verify-migration.ts",
+    "catalog:audit": "tsx scripts/audit-catalog.ts",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "test:live": "node engine/smartcart-live-qa.mjs",
+    "test:live:agent": "tsx scripts/live-agent-smoke.ts"
+  },
+  "dependencies": {
+    "@google/genai": "3.6.1",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.68.0",
+    "mongodb": "7.9.0",
+    "next": "16.4.5",
+    "radix-ui": "1.8.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwind-merge": "3.7.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.4",
+    "@types/node": "22.20.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.4",
+    "tsx": "4.23.15",
+    "tw-animate-css": "1.4.0",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "sourceFile": "smartcart_products_DB(2).json",
+  "sourceSha256": "8fdef66b4f77b164b30754c406a8470f96f60ed1fad8509c60bf3081dc1991c4",
+  "dryRun": false,
+  "sourceRecords": 31330,
+  "validRecords": 31330,
+  "rejected": [],
+  "duplicateIdenticalRecords": 0,
+  "conflictingDuplicateIds": [],
+  "inserted": 0,
+  "updated": 0,
+  "unchanged": 31330,
+  "pruned": 0,
+  "dbOffersNotInSource": 0,
+  "stores": [
+    {
+      "storeKey": "shufersal:7290027600007:002:413",
+      "productCount": 15885
+    },
+    {
+      "storeKey": "rami_levy:7290058140886:001:039",
+      "productCount": 15445
+    }
+  ],
+  "startedAt": "2026-11-19T13:23:18.669Z",
+  "finishedAt": "2026-11-19T13:23:30.169Z",
+  "durationMs": 11500
+}

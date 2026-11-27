@@ -35,13 +35,14 @@ const matches = await matchProducts({
     callMetrics.promptUtf8Bytes += Buffer.byteLength(prompt, 'utf8');
     const rows = JSON.parse(prompt.slice(prompt.lastIndexOf('\nProducts: ') + '\nProducts: '.length));
     callMetrics.largestBatch = Math.max(callMetrics.largestBatch, rows.length);
-    return { decisions: rows.map(row => ({
-      id: row.id,
-      identity: /^(?:חלב)\s/u.test(row.name) && /\d\s*%/u.test(row.name) ? 'MATCH' : 'NO_MATCH',
-      reason: 'Mock used to measure program throughput.',
-      requirementChecks: [],
-      preferencesMet: []
-    })) };
+    return { decisions: rows.map(row => {
+      const identity = /^(?:חלב)\s/u.test(row.name) && /\d\s*%/u.test(row.name) ? 'MATCH' : 'NO_MATCH';
+      return {
+        id: row.id, candidate: 'Mock used to measure program throughput', identityEvidence: row.name,
+        relation: identity === 'MATCH' ? 'SAME_PRODUCT' : 'RELATED_DIFFERENT', identity,
+        requirementChecks: [], preferencesMet: []
+      };
+    }) };
   }
 });
 const matchMs = elapsed(beforeMatch);

@@ -24,7 +24,7 @@ const brand = (requirement, evidence, extra) => claim(requirement, evidence, { k
 const fixtureMilk = (id, value = '3%', other = {}) => catalogOffer(id, 'חלב תנובה ' + value, { unit: 'l', ...other });
 
 function validate(item, product, options) {
-  return validateMatchBatch({ decisions: [decision(product._id, options)] }, [product],
+  return validateMatchBatch({ decisions: [decision(product, options)] }, [product],
     item.preferences, item.requirements, { item })[0];
 }
 
@@ -71,7 +71,7 @@ scenario(28, 'milk search retains nearby identities for a separate match decisio
   assert.deepEqual(ids(candidates), ['drink', 'chocolate', 'powder', 'candy']);
   const result = await matchProducts({
     item: milk, products: candidates,
-    callModel: async ({ prompt }) => ({ decisions: submittedCandidates(prompt).map(({ id }) => decision(id, {
+    callModel: async ({ prompt }) => ({ decisions: submittedCandidates(prompt).map(({ id, name }) => decision({ id, name }, {
       identity: id === 'drink' ? 'MATCH' : 'NO_MATCH',
       checks: id === 'drink' ? [fat('3%')] : [claim('3%', '', { result: 'UNKNOWN', source: 'NONE' })]
     })) })
@@ -169,7 +169,7 @@ scenario(42, 'mistaken model positive cannot override literal contrary fat evide
   assert.equal(validate(milk, fixtureMilk('one', '1%'), { checks: [fat('1%')] }).status, 'NO_MATCH');
 });
 
-const goodMilkDecision = id => decision(id, { checks: [fat('3%')], preferences: ['Tnuva'] });
+const goodMilkDecision = id => decision(id, { evidence: 'חלב', checks: [fat('3%')], preferences: ['Tnuva'] });
 for (const [number, title, invalid] of [
   [43, 'malformed response for one candidate', { id: 'affected', identity: false }],
   [44, 'duplicate mandatory check', { ...goodMilkDecision('affected'), requirementChecks: [fat('3%'), fat('3%')] }],
@@ -234,7 +234,7 @@ scenario(51, 'changing hard brand to optional invalidates the checkpoint', async
   });
   const soft = await runMatchWithCheckpoint({
     item: { ...mozzarella, preferences: ['Tnuva'] }, products, checkpointPath,
-    callModel: async () => ({ decisions: [decision('gad')] })
+    callModel: async () => ({ decisions: [decision('gad', { evidence: 'מוצרלה' })] })
   });
   assert.deepEqual(codes(hard.rejected), ['gad']);
   assert.deepEqual(codes(soft.matches), ['gad']);
@@ -295,7 +295,7 @@ scenario(54, 'every offered ID appears exactly once across all result buckets', 
   const result = await matchProducts({
     item: milk, products,
     callModel: async ({ prompt }) => ({ decisions: submittedCandidates(prompt).map(({ id, name }) =>
-      decision(id, { checks: [fat(name.includes('3%') ? '3%' : (name.includes('1%') ? '1%' : 'חלב'))] })) })
+      decision({ id, name }, { checks: [fat(name.includes('3%') ? '3%' : (name.includes('1%') ? '1%' : 'חלב'))] })) })
   });
   const buckets = [result.matches, result.rejected, result.uncertain];
   const all = buckets.flatMap(codes);
@@ -566,7 +566,7 @@ scenario(85, 'very cheap wrong hard brand cannot enter any pricing mode', async 
   const match = await matchProducts({
     item, products,
     callModel: async () => ({ decisions: [
-      decision('tnuva', { checks: [brand('Tnuva', 'תנובה')] }),
+      decision('tnuva', { evidence: 'חלב', checks: [brand('Tnuva', 'תנובה')] }),
       decision('gad', { checks: [brand('Tnuva', 'גד', { result: 'CONTRADICTED', source: 'MANUFACTURER' })] })
     ] })
   });

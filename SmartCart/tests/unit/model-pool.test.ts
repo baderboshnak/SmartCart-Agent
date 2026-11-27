@@ -8,8 +8,10 @@ import {
   allBusy, createPooledAgentModel, createPooledMatcher, ModelHealth, neutralizeSignatures,
   REST_AFTER_BUSY_MS, REST_AFTER_MISSING_MS, restAfter, SKIP_SIGNATURE
 } from '@/lib/agent/model-pool';
-import { getGeminiConfig } from '@/lib/env';
-import { ConfigurationError } from '@/lib/shared/errors';
+import { getGeminiConfig, getVoiceConfig } from '@/lib/env';
+import { getAgentModel, getMatcher } from '@/lib/server/services';
+import { describeError } from '@/lib/server/terminal-trace';
+import { ConfigurationError, ModelError } from '@/lib/shared/errors';
 import { engineItemCore } from '@/lib/shopping/engine-items';
 import { fixtureSearch, referenceItems } from '../helpers/fixtures';
 import { createFakeMatcher, textTurn } from '../helpers/fake-models';
@@ -105,6 +107,30 @@ describe('agent model with backups', () => {
       error instanceof Error && /All available Gemini models are overloaded/u.test(error.message) && isTransientModelError(error));
   });
 
+  test('debug mode prints Gemini\'s own error text per model, which model answered, and a summary when all fail', async () => {
+    const details: Array<{ step: string; content: unknown }> = [];
+    const trace = Object.assign(() => {}, { mode: 'on' as const, detail: (step: string, content: unknown) => { details.push({ step, content }); } });
+    const overloaded = Object.assign(new Error('{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}'), { status: 503 });
+
+    const model = createPooledAgentModel({
+      models: ['main', 'backup'], health: new ModelHealth(), trace,
+      generate: async name => {
+        if (name === 'main') throw new ModelError('The Gemini model is temporarily overloaded.', { cause: overloaded });
+        return textTurn('from backup');
+      }
+    });
+    assert.equal((await model.generate(request())).model, 'backup', 'the reply says which model wrote it');
+    const failed = details.find(entry => /^Gemini agent call to main failed \(temporarily_unavailable\) after \d+ ms$/u.test(entry.step));
+    assert.match(JSON.stringify(describeError(failed?.content)), /The model is overloaded\./u, 'Gemini\'s own words, not only ours');
+
+    const all = createPooledAgentModel({ models: ['a', 'b'], health: new ModelHealth(), trace, generate: async () => { throw overloaded; } });
+    await assert.rejects(all.generate(request()));
+    assert.deepEqual(details.at(-1), {
+      step: 'no Gemini model could answer this agent turn',
+      content: { a: '503 The model is overloaded.', b: '503 The model is overloaded.' }
+    });
+  });
+
   test('switching models replaces the previous model\'s thought signatures', async () => {
     const received: Content[][] = [];
     let mainBusy = false;
@@ -174,7 +200,7 @@ describe('product checks spread across models', () => {
   });
 });
 
-describe('model lists from the environment', () => {
+describe('shopping and voice model configuration', () => {
   function withEnv(values: Record<string, string | undefined>, check: () => void) {
     const saved = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
     const apply = (entries: Record<string, string | undefined>) => {
@@ -188,25 +214,27 @@ describe('model lists from the environment', () => {
   }
   const base = { MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017', GEMINI_API_KEY: 'test-key' };
 
-  test('defaults: the main agent model with backups, and two checking models that share the work', () => {
-    withEnv({ ...base, GEMINI_MODEL: undefined, GEMINI_BACKUP_MODELS: undefined, SMARTCART_MATCH_MODEL: undefined, SMARTCART_MATCH_BACKUP_MODELS: undefined }, () => {
-      const config = getGeminiConfig();
-      assert.equal(config.agentModels[0], 'gemini-3.1-flash-lite');
-      assert.ok(config.agentModels.length > 1, 'the agent has backups');
-      assert.ok(!config.agentModels.includes('gemini-3.5-flash-lite'), 'the model that builds invalid cart changes is not an agent backup');
-      assert.deepEqual(config.matchModels, ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite']);
-      assert.ok(config.matchBackupModels.every(model => !config.matchModels.includes(model)), 'no model is both');
+  test('the agent and matcher share 3.5 Flash-Lite, and Live uses its voice model', () => {
+    withEnv({ ...base, GEMINI_MODEL: undefined, GEMINI_LIVE_MODEL: undefined }, () => {
+      assert.equal(getAgentModel().name, 'gemini-3.5-flash-lite');
+      assert.equal(getMatcher().model, 'gemini-3.5-flash-lite');
+      assert.equal(getVoiceConfig().liveModel, 'gemini-3.8-live');
     });
   });
 
-  test('lists are comma-separated, repeats are dropped, an empty backup list means no backups, Live models are rejected', () => {
-    withEnv({ ...base, GEMINI_MODEL: 'm1', GEMINI_BACKUP_MODELS: ' m2, m1 ,,m3 ', SMARTCART_MATCH_MODEL: 'c1', SMARTCART_MATCH_BACKUP_MODELS: '' }, () => {
-      const config = getGeminiConfig();
-      assert.deepEqual(config.agentModels, ['m1', 'm2', 'm3']);
-      assert.deepEqual(config.matchModels, ['c1']);
-      assert.deepEqual(config.matchBackupModels, []);
+  test('only the shared shopping selector applies, even with obsolete settings in the environment', () => {
+    withEnv({ ...base, GEMINI_MODEL: '  gemini-3.5-flash-lite  ', GEMINI_BACKUP_MODELS: 'obsolete-agent',
+      SMARTCART_MATCH_MODEL: 'obsolete-checker', SMARTCART_MATCH_BACKUP_MODELS: 'obsolete-backup' }, () => {
+      assert.deepEqual(getGeminiConfig(), { apiKey: 'test-key', model: 'gemini-3.5-flash-lite' });
+      assert.equal(getAgentModel().name, 'gemini-3.5-flash-lite');
+      assert.equal(getMatcher().model, 'gemini-3.5-flash-lite');
     });
-    withEnv({ ...base, GEMINI_BACKUP_MODELS: 'gemini-3.8-live' }, () =>
-      assert.throws(() => getGeminiConfig(), (error: unknown) => error instanceof ConfigurationError && /Live model/u.test(error.message)));
+  });
+
+  test('GEMINI_MODEL accepts one generateContent model', () => {
+    withEnv({ ...base, GEMINI_MODEL: 'gemini-3.8-live' }, () =>
+      assert.throws(() => getGeminiConfig(), (error: unknown) => error instanceof ConfigurationError && /generateContent/u.test(error.message)));
+    withEnv({ ...base, GEMINI_MODEL: 'model-a,model-b' }, () =>
+      assert.throws(() => getGeminiConfig(), /must name one model/u));
   });
 });

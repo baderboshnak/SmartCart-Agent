@@ -1,4 +1,4 @@
-import { corroborateUnitSize, interpretPackage, normalizeAmount, parseUnit } from './smartcart-package.mjs';
+import { corroborateUnitSize, countsPackages, interpretPackage, normalizeAmount, parseUnit } from './smartcart-package.mjs';
 
 // Catalog names can corroborate explicit label claims. A missing label gives no evidence.
 const labels = [
@@ -98,10 +98,14 @@ export function corroborateSizeRequirement(requirement, product, item) {
   const amount = Number(value.replace(',', '.'));
   const normalized = normalizeAmount(amount, unit);
   if (!normalized || normalized.family === 'count') return null;
-  if (parseUnit(item.quantity?.unit)?.family === 'count') {
+  // "2 packs of 500 g pasta" or "3 units of 1 l milk": the size is the size of each sale package.
+  const plainItem = { ...item, quantity: { amount: 0, unit: 'unspecified' } };
+  const perPackage = countsPackages(item.quantity?.unit, interpretPackage(product, plainItem, null).packageAmount,
+    product.package?.isWeighted);
+  if (!perPackage && parseUnit(item.quantity?.unit)?.family === 'count') {
     return corroborateUnitSize(product, item, amount, unit);
   }
-  const reconciled = interpretPackage(product, item, normalized);
+  const reconciled = interpretPackage(product, perPackage ? plainItem : item, normalized);
   const actual = reconciled.packageAmount;
   if (!actual || reconciled.package.isWeighted) return unknown();
   const named = reconciled.packageInterpretation.evidence.find(entry =>
@@ -117,11 +121,43 @@ const rangeAfter = /^\s*(?:[-‐‑‒–—−־]|to|or|עד|או)\s*\d/u;
 const relativeBefore = /(?:\b(?:reduced by|increased by|lower by|higher by|reduction of|increase of|discount of)|(?<!\p{L})(?:הופחת ב|הפחתה של|הנחה של))\s*$/u;
 const relativeAfter = /^\s*(?:less|more|fewer|lower|higher|extra|reduced|reduction|increased|increase|decrease|discount|off|savings|or (?:above|below|more|less)|פחות|יותר|תוספת|הפחתה|הנחה|ומעלה|ומטה|או פחות|או יותר)(?!\p{L})/u;
 
+// A requirement can bound a percentage instead of naming it: "less than 5% fat", "עד 3%",
+// "5% שומן ומטה", "أقل من 5%". "No more than" is listed before "more than" so it wins.
+const boundBefore = [
+  ['<=', /up to|at most|no more than|not more than|maximum(?: of)?|max\.?|<=|≤|לא יותר מ|לכל היותר|מקסימום|עד|لا يزيد عن|بحد أقصى|حتى|لغاية/],
+  ['>=', /at least|no less than|not less than|minimum(?: of)?|min\.?|>=|≥|לא פחות מ|לפחות|מינימום|على الأقل|بحد أدنى|لا يقل عن/],
+  ['<', /less than|fewer than|lower than|under|below|<|פחות מ|מתחת ל|أقل من|اقل من|تحت/],
+  ['>', /more than|greater than|higher than|over|above|>|יותר מ|מעל ל?|أكثر من|اكثر من|فوق/]
+];
+const boundAfter = [
+  ['<=', /or (?:less|lower|below|under)|and (?:less|lower|below|under)|max(?:imum)?|at most|ומטה|או פחות|לכל היותר|מקסימום|فأقل|أو أقل|او اقل|كحد أقصى/],
+  ['>=', /or (?:more|higher|above|over)|and (?:more|higher|above|over)|min(?:imum)?|at least|ומעלה|או יותר|לפחות|מינימום|فأكثر|أو أكثر|او اكثر|كحد أدنى/]
+];
+const compare = { '=': (a, b) => a === b, '<': (a, b) => a < b, '<=': (a, b) => a <= b, '>': (a, b) => a > b, '>=': (a, b) => a >= b };
+
+/** The comparison a percentage requirement asks for, and its wording without the bound. */
+function percentBound(requirement, target) {
+  const before = requirement.slice(0, target.index);
+  const after = requirement.slice(target.index + target[0].length);
+  for (const [op, cue] of boundBefore) {
+    const found = before.match(new RegExp(`(?<![\\p{L}])(?:${cue.source})\\s*[-־]?\\s*$`, 'iu'));
+    if (found) return { op, subject: `${before.slice(0, found.index)} ${after}` };
+  }
+  for (const [op, cue] of boundAfter) {
+    const lead = after.match(new RegExp(`^\\s*(?:${cue.source})(?![\\p{L}])`, 'iu'));
+    if (lead) return { op, subject: `${before} ${after.slice(lead[0].length)}` };
+    const tail = after.match(new RegExp(`(?<![\\p{L}])(?:${cue.source})\\s*$`, 'iu'));
+    if (tail) return { op, subject: `${before} ${after.slice(0, tail.index)}` };
+  }
+  return { op: '=', subject: `${before} ${after}` };
+}
+
 function percentageClaim(requirement, name) {
   const amounts = Array.from(requirement.matchAll(percentages));
   if (amounts.length !== 1) return null;
   const target = amounts[0];
-  const subject = requirement.replace(target[0], '').trim();
+  const bound = percentBound(requirement, target);
+  const subject = bound.subject.replace(/\s+/gu, ' ').trim().replace(/^(?:with|containing|עם|مع)\s+/iu, '');
   const knownMetric = metrics.find(([, label]) => exact(subject, label))?.[0];
   const metric = knownMetric ?? subject;
   const metricLabels = subject && !knownMetric ? [...metrics, [subject, literal(subject)]] : metrics;
@@ -165,7 +201,7 @@ function percentageClaim(requirement, name) {
   if (candidates.some(observation => !observation.exact)) return unknown();
   if ((!metric && observations.length !== 1) || new Set(candidates.map(x => x.amount)).size !== 1) return unknown();
   const first = candidates[0];
-  return confirmed(first.amount === percentAmount(target) ? 'MET' : 'CONTRADICTED', first.evidence);
+  return confirmed(compare[bound.op](first.amount, percentAmount(target)) ? 'MET' : 'CONTRADICTED', first.evidence);
 }
 
 export function manufacturerName(product) {

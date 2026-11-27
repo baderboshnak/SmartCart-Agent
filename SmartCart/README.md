@@ -24,6 +24,41 @@ npm start
 
 `GET /api/health` reports the database connection, the product count, the stores and whether Gemini is configured. It never returns credentials.
 
+### Follow background work in the terminal
+
+Keep `npm run dev` open while you use SmartCart. The terminal shows timed Gemini turns and replies, tool calls and results, catalog searches, product checks, pricing, and basket verification. Each line has a request ID so you can follow a request while other work runs.
+
+For voice, look for `[smartcart live …]` lines. They show microphone and connection setup, the handoff to the shopping agent, when Gemini Live starts speaking, and what it heard and said at the end of each exchange. The browser sends these diagnostics through an authenticated SmartCart endpoint. The shopping agent prints the Live voice ID when it receives the request. Audio still travels directly between the browser and Gemini Live.
+
+Set `SMARTCART_DEBUG` in `.env` and restart the server to choose the detail level:
+
+- `0` shows short summaries with major steps, outcomes, and durations. This is the production default.
+- `1` shows readable detail blocks with timings, including customer text, model replies, tool inputs and results, and provider errors. Long terminal blocks are previewed, and the recorded content is saved to `logs/smartcart.log`. This is the development default.
+- `full` shows the full detail blocks, low-level events such as matcher queues and batch progress, and the instructions sent to Gemini on the first turn.
+
+An example of the handoff from Live to the shopping agent:
+
+```text
+[smartcart live 6a99ad9f-8bf] +242 ms Gemini Live asked the shopping agent: Request: Add milk
+[smartcart agent 840a2f7e-03c] +5 ms Voice request received · via=voice · message Chars=8 · voice Id=6a99ad9f-8bf
+[smartcart agent 840a2f7e-03c] +11 ms Planning with Gemini · turn=1
+[smartcart agent 840a2f7e-03c] +2.4 s Answered in 2.4 s · 1 cart item · verified basket · kind=text
+[smartcart live 6a99ad9f-8bf] +3.1 s exchange finished
+    │ Heard: Add milk
+    │ Said: I added milk to your cart.
+```
+
+`npm run dev` and `npm start` automatically append the summary history to `logs/smartcart-summary.log` and the event-level server trace to `logs/smartcart.log` under `SmartCart`. The server trace includes Gemini attempts and retries, tool activity, catalog search and matching progress, pricing, verification, and database saves. Git ignores both files.
+
+From `SmartCart`, follow either file in a separate PowerShell window:
+
+```powershell
+Get-Content .\logs\smartcart-summary.log -Encoding UTF8 -Tail 30 -Wait
+Get-Content .\logs\smartcart.log -Encoding UTF8 -Tail 50 -Wait
+```
+
+In the trace file, `+Nms` is time since the request or voice session started and `durationMs` is the time spent on a specific step. The `agent.timing` event breaks down the total into Gemini turns, tools, and other work such as database calls. Gemini product checks count toward the tool that ran them.
+
 ## Configuration
 
 All variables are read on the server. None reach the browser.
@@ -32,13 +67,11 @@ All variables are read on the server. None reach the browser.
 | --- | --- | --- |
 | `MONGODB_URI` | yes | Atlas connection string. |
 | `MONGODB_DB_NAME` | no (`smartcart`) | Application database. |
-| `GEMINI_API_KEY` | yes, for the agent | Google Gemini API key. |
-| `GEMINI_MODEL` | no (`gemini-3.1-flash-lite`) | The main agent model: a `generateContent` model with function calling. A Live model name such as `gemini-3.8-live` is rejected with a clear error. |
-| `GEMINI_BACKUP_MODELS` | no (`gemini-3.6-flash,gemma-4-26b-a4b-it,gemini-3.8-flash,gemma-4-31b-it,gemini-4-hydrogen`) | Agent backups, tried in order when the main model is overloaded, rate limited, slow or missing. Empty means no backups. |
-| `SMARTCART_MATCH_MODEL` | no (`gemini-3.1-flash-lite,gemini-3.5-flash-lite`) | Product-checking models. Checking calls are spread evenly across them. |
-| `SMARTCART_MATCH_BACKUP_MODELS` | no (`gemini-3.6-flash,gemini-3.8-flash,gemma-4-31b-it,gemini-4-hydrogen`) | Checking backups, used only when every checking model is busy. Empty means no backups. |
+| `GEMINI_API_KEY` | yes, for Gemini calls | Google Gemini API key. |
+| `GEMINI_MODEL` | no (`gemini-3.5-flash-lite`) | One `generateContent` model with function calling for the shopping agent, product checks, and file-based CLI. |
 | `SMARTCART_MATCH_CONCURRENCY` | no (`12`) | Most product-checking calls to Gemini running at the same time across the whole server process (1 to 64). Each cart is also limited to 12. |
-| `GEMINI_LIVE_MODEL` | no (`gemini-3.8-live`) | Gemini Live model for the website's voice feature (it listens and speaks) and for the legacy CLI in `engine/`. |
+| `GEMINI_LIVE_MODEL` | no (`gemini-3.8-live`) | Gemini Live model for real-time voice. |
+| `SMARTCART_DEBUG` | no (`1` in development, `0` in production) | `0` shows short summaries. `1` shows timed agent and Live details with previews of long blocks. `full` includes whole blocks, low-level events, and Gemini instructions. |
 
 ## MongoDB setup
 
@@ -71,9 +104,7 @@ At runtime the application reads products only from MongoDB. If the database is 
 | `agent_runs` | Per run: status, model, duration, model turns, tool summaries, matcher calls, token usage and errors. No prompts, reasoning or secrets. Kept 30 days. | `run_session_started`, `run_expiry_ttl` |
 | `match_cache` | Validated matcher decisions keyed by item constraints, the offer, a fingerprint of the product's name, manufacturer and package, and the model. Kept 14 days. | `match_cache_ttl`, `match_cache_product` |
 
-**Several models share the work.** Product checks rotate across the checking models; the agent uses its main model. A model that answers 429/503, times out (30 s per agent turn, 40 s per batch of checks) or is missing (404) rests for a minute (30 minutes when missing) and the call moves to the next model at once. One record of resting models is shared by the whole server. When a run switches models, earlier thought signatures are replaced with Gemini's documented skip value so the next model accepts the history. The defaults come from a live test of every model on the project's key: `gemini-3.5-flash-lite` checks products well but builds invalid cart changes, so it only checks; `gemma-4-26b-a4b-it` builds carts but timed out on product checks; `gemini-2.5-flash` and `gemini-2.5-flash-lite` returned 404.
-
-`match_cache` is the only collection beyond the suggested set. It exists because product matching dominates cost and latency: "חלב" alone has 392 candidates. Cached decisions are revalidated deterministically before reuse. A change to the requirements, the model, or the product's name, manufacturer or package produces a new key. Price and date changes keep the key, so a catalog refresh does not repeat the checks; prices always come from the current record.
+`match_cache` is the only collection beyond the suggested set. It exists because product matching dominates cost and latency: "חלב" alone has 392 candidates. Cached decisions are revalidated deterministically before reuse. A change to the requirements, the model, the product's name, manufacturer or package, or the matcher itself produces a new key. The key includes `MATCHER_FINGERPRINT`, a hash of the matcher's instructions, answer format and validation version, so decisions made under older matching rules are never reused. Saved decisions without the current answer fields also fail revalidation and are checked again. Price and date changes keep the key, so a catalog refresh does not repeat the checks; prices always come from the current record.
 
 ## How it works
 
@@ -89,14 +120,14 @@ Browser (Next.js UI) ──POST /api/agent (SSE)──▶ Agent loop (Gemini fun
 
 ### The agent
 
-`src/lib/agent/` runs a bounded plan → act → observe loop with Gemini function calling. Each customer message starts one run. Gemini chooses tools, the backend executes them, and Gemini sees the actual results before deciding what to do next.
+`src/lib/agent/` runs a bounded plan → act → observe loop with Gemini function calling. Gemini 3.5 Flash-Lite handles both the shopping agent and product matching in the default setup. Each customer message starts one run. Gemini chooses tools, the backend executes them, and Gemini sees the actual results before deciding what to do next.
 
 | Tool | What the backend does |
 | --- | --- |
 | `getCurrentCart` | Reads the authoritative cart from MongoDB. |
 | `updateCart` | Adds direct items or recipe ingredients, removes items, changes quantities, requirements, preferences, search terms, mode, budget or store, or clears the cart. Every change is validated and saved with a revision check. |
 | `searchProducts` | Full-recall MongoDB retrieval for cart items, or bounded catalog exploration ("do you have oat milk?"). |
-| `matchProducts` | The original matcher: Gemini judges identity and each mandatory requirement; deterministic code verifies the evidence against catalog data. Results are MATCH, NO_MATCH or UNCERTAIN. |
+| `matchProducts` | The original matcher: Gemini reads the request once, then judges in batches what each candidate is and each mandatory requirement; deterministic code checks the answers and verifies the evidence against catalog data. Results are MATCH, NO_MATCH or UNCERTAIN. |
 | `calculatePurchaseOptions` | Whole-package counts, unit conversion, totals and extra quantity per store. Weighted offers are estimates only. |
 | `optimizeBasket` | Complete single-store baskets in cheapest, balanced and preferences-first modes, independently verified and saved. Runs missing earlier stages automatically. |
 | `compareStores` | Verified totals per store and the reasons a store is incomplete. |
@@ -106,7 +137,8 @@ Browser (Next.js UI) ──POST /api/agent (SSE)──▶ Agent loop (Gemini fun
 Safeguards:
 
 - **Allowlist and validation.** Unknown tools and invalid arguments are rejected and reported back to the model, which can correct itself. Gemini never sees raw database access, shell commands or code execution.
-- **Limits.** 10 model turns, 24 tool calls and 8 calls per turn per run; each model gets 30 seconds per turn before a backup model takes over (100 seconds per turn in all), with up to three retries for transient errors (2, 5 and 10 seconds apart when Gemini reports overload or rate limits); per-tool timeouts; a 270-second run deadline. When a limit is reached, the model must answer in text. Each session allows one active run and at most 20 runs per 10 minutes. Product checks run at most 12 at a time per cart, and a single large item can use all 12; the server allows at most `SMARTCART_MATCH_CONCURRENCY` (12) at a time; a cancelled request leaves the queue immediately. Vague requests such as "something tasty with chocolate" are never searched as a whole category: the agent adds the specific items and asks which product the customer means.
+- **Limits.** Each run allows 10 model turns, 24 tool calls, and 8 tool calls per turn. Each agent model attempt has a 30-second limit, and each product-check attempt has a 40-second limit. Transient failures retry with the same model. The run has a 270-second deadline. When a limit is reached, the model must answer in text. Each session allows one active run and at most 20 runs per 10 minutes. Product checks run at most 12 at a time per cart, and a single large item can use all 12. The server allows at most `SMARTCART_MATCH_CONCURRENCY` (12) at a time. A cancelled request leaves the queue immediately. For vague requests such as "something tasty with chocolate," the agent adds any specific items and asks which product the customer means.
+- **Product identity.** A shared word is not a match: "חלב" (milk) must not buy condensed milk, a s'mores milk drink or milk chocolate just because they are cheaper. Before checking any candidate, Gemini reads the request once: what a reasonable shopper means and which related products do not count. Every batch of 25 candidates uses that same reading, because a batch with no real match otherwise tends to accept the closest product. For each candidate Gemini states what it is, quotes those words from its name, and gives its relation to the request (`SAME_PRODUCT`, `SPECIAL_VARIANT`, `FLAVORED_WITH`, `CONTAINS_IT`, `DERIVED`, `RELATED_DIFFERENT`, `ACCESSORY` or `UNCLEAR`) before the verdict. The backend accepts a MATCH only when the verdict agrees with the relation (MATCH only for `SAME_PRODUCT`) and the quoted words are on the label. Anything else becomes UNCERTAIN and is never priced. A quote shows Gemini read the label; it never proves a match by itself. The identity rules name no products: a request that names the specific product ("חלב מרוכז", "יוגורט תות") gets exactly that product.
 - **Grounded extraction.** New items must be copied verbatim from the customer's message and pass the engine's request-coverage validator, which rejects a dropped "3%" or quantity. Wording left next to the extracted span that holds a number, qualifier, "preferably" or "only" is rejected. New requirements and preferences must appear in the customer's words, and a mandatory requirement can be relaxed only when the customer names it.
 - **Independent verification.** Before a basket is shown, `src/lib/shopping/validation.ts` reloads every product from MongoDB and recomputes the following: store identity, prices in integer cents, package interpretation (for example, a "1 unit" listing of a 12-egg carton), requirement proof, quantity coverage, preferences, totals, and the mode and budget rules. A failed check marks the cart `VERIFICATION_FAILED`, and no total is shown.
 - **Final validation.** If the cart changed after the agent's last calculation, the backend recalculates and verifies it before the final answer, and the model answers from the verified result.
@@ -114,14 +146,16 @@ Safeguards:
 
 ### Voice
 
-Voice adds a way in and out; the shopping work does not change.
+Gemini 3.8 Live handles speech and sends shopping requests to the same agent used for typed messages.
 
 1. The customer taps the microphone. The browser asks `POST /api/voice/token` for a short-lived Gemini Live token. The token works once, must be used within 60 seconds, expires after 30 minutes, and locks every Live setting (instructions, tool, transcription), so the browser cannot repurpose it. The real API key never leaves the server.
 2. The browser connects to Gemini Live directly, streams microphone audio (16 kHz PCM) and plays the spoken reply (24 kHz PCM). Speaking while SmartCart talks interrupts it.
-3. Live transcribes the customer's words and calls its only tool, `shopping_agent`, with the request. The browser passes it to `POST /api/agent` with `via: "voice"`, the same agent and checks as typed messages. Spoken numbers are converted first ("three percent" becomes "3%"), and the chat shows the exact text the agent used.
+3. Live transcribes the customer's words and calls its only tool, `shopping_agent`, with the request (untranslated) and the language it heard. The browser passes both to `POST /api/agent` with `via: "voice"`, the same agent and checks as typed messages. Spoken numbers are converted first ("three percent" becomes "3%"), and the chat shows the exact text the agent used.
 4. The verified answer goes back to Live, which reads it out loud without changing numbers. The chat shows the request, the answer, live captions and the same progress steps as for typing.
 
 Small talk that never reaches the agent is answered by Live directly and shown in the chat for that page only. Voice needs microphone permission and a secure page (HTTPS or `localhost`).
+
+Replies use the customer's language (English, Hebrew or Arabic). The backend picks it, not the model: the language Live heard for speech, otherwise the script of most of the message's words, otherwise the customer's previous message. The English suggestion buttons ("Make it cheaper") keep the conversation's language. Live may answer only in those three languages. When it cannot tell which one it heard, it uses the language of the earlier chat, or Hebrew if there is none.
 
 ### Streaming
 
@@ -145,8 +179,8 @@ Mutating routes reject cross-site `Origin` headers. Errors use `{ error: { code,
 
 | Command | Scope | Network |
 | --- | --- | --- |
-| `npm test` | Legacy engine suite (247) plus unit, agent, voice, limit and model-pool tests (86) | none |
-| `npm run test:db` | Database and integration tests (25) on a disposable `smartcart_test_*` database that is dropped afterwards | Atlas |
+| `npm test` | Legacy engine suite (247) plus unit, agent, voice, language, logging, limit, model-pool and semantic-matching tests (128) | none |
+| `npm run test:db` | Database and integration tests (28) on a disposable `smartcart_test_*` database that is dropped afterwards | Atlas |
 | `npm run test:e2e` | HTTP tests against `next start` (4); run `npm run build` first | Atlas |
 | `npm run typecheck` | TypeScript across the app, scripts and tests | none |
 | `npm run benchmark` | MongoDB search and pipeline timing with a local matcher stand-in | Atlas |
@@ -158,8 +192,11 @@ Real Gemini calls run only on request and spend API credits:
 ```powershell
 npx tsx scripts/live-agent-smoke.ts "I want 2 liters of 3% milk, preferably Tnuva, and 12 eggs" --allow-live --cleanup
 npx tsx scripts/live-voice-smoke.ts "I want two liters of three percent milk and twelve eggs" --allow-live --cleanup
-npm run test:live -- --allow-live    # legacy CLI scenarios over Gemini Live
+npm run test:live -- --allow-live    # legacy CLI scenarios with GEMINI_MODEL
+npm run test:live:matching -- --allow-live    # semantic matching: labelled cases plus the 392 "חלב" offers
 ```
+
+Mocked answers can only test the plumbing, so semantic accuracy is measured live. `test:live:matching` sends the labelled cases in `tests/fixtures/semantic-match-cases.ts` through the app's matcher: the task's examples, English and Arabic requests, categories the instructions never mention, explicit constraints and missing information. It then matches every catalog-sample offer found for "חלב" and checks that the basket buys plain milk. Pass `--matcher <module>` to run another engine matcher (such as the previous version) on the same cases. On 2026-11-26 with `gemini-3.5-flash-lite`, two runs each scored 100/100 labelled decisions, with no wrong match among the 392 offers. The previous matcher scored 94/100 and accepted 33 wrong milk offers; its basket bought a banana milk drink.
 
 ## Project structure
 
@@ -179,7 +216,7 @@ The engines in `engine/` hold the matching, package-interpretation and basket-op
 
 ### Legacy CLI
 
-The original file-based pipeline still works for development. It uses the Gemini Live API (`GEMINI_LIVE_MODEL`) and needs an explicit catalog file, because the production catalog now lives in MongoDB:
+The file-based pipeline uses `GEMINI_MODEL` through `generateContent` for request parsing and product checks. It needs an explicit catalog file because the web app's catalog lives in MongoDB.
 
 ```powershell
 $catalog = 'C:\Users\UPDATE\SmartCart-backups\catalog\smartcart_products_DB(2).json'
@@ -198,7 +235,8 @@ Repeat the search, match and quantity steps for each item index. The CLI writes 
 - Two stores are loaded. More stores and fresher snapshots need a recurring import, which the idempotent migration supports.
 - Matching quality depends on catalog wording. Many names are abbreviated, and about a third of offers have no manufacturer, so brand requirements often remain unverified (UNCERTAIN) and those offers are excluded.
 - An item whose search returns more than 800 candidates is truncated. The agent is told to use more specific Hebrew terms.
-- The first match of a new item costs Gemini calls in proportion to the candidates (about 25 per call). Repeats are served from `match_cache`.
+- The first match of a new item costs one reading call plus Gemini calls in proportion to the candidates (about 25 per call). Repeats are served from `match_cache`.
+- Semantic matching is a model judgment, so results can vary between runs. Some decisions are debatable and are reported, not scored: plain "milk" accepts goat and lactose-free milk; "breadcrumbs" usually rejects gluten-free breadcrumbs; "tomatoes" may or may not accept cherry tomatoes. When the customer states a requirement such as "lactose-free", the label is still checked deterministically.
 - The server-wide limit on checking calls counts calls within one server process. Several server instances each have their own limit.
 - Weighted products stay out of automatic baskets until store-specific weighing rules are verified.
 - Recipe quantities are model estimates and are labelled as such.

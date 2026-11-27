@@ -107,7 +107,8 @@ test('T22 repeated milk reaches checkout planning with all three liters accounte
     products: searchCatalog([product], item).results,
     context: createItemContext(plan, index),
     callModel: () => ({ decisions: [{
-      id: product._id, identity: 'MATCH', reason: 'Milk identity', requirementChecks: [], preferencesMet: []
+      id: product._id, candidate: 'Milk', identityEvidence: product.name, relation: 'SAME_PRODUCT', identity: 'MATCH',
+      requirementChecks: [], preferencesMet: []
     }] })
   }))));
   const { recommendedBasket } = optimizeBaskets(options, { request: plan });
@@ -131,7 +132,7 @@ test('T23 exact size per bottle prevents a cheap half-liter SKU from entering th
     products: searchCatalog(products, item).results,
     context: createItemContext(plan, 0),
     callModel: () => ({ decisions: products.map(product => ({
-      id: product._id, identity: 'MATCH', reason: 'Milk identity',
+      id: product._id, candidate: 'Milk', identityEvidence: product.name, relation: 'SAME_PRODUCT', identity: 'MATCH',
       requirementChecks: [{ requirement: '1 liter', kind: 'OTHER', result: 'MET',
         evidenceSource: 'NAME', evidence: product.name }],
       preferencesMet: []

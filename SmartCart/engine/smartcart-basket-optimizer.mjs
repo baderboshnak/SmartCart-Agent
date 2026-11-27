@@ -17,7 +17,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeAmount, normalizeRequestedQuantity } from './smartcart-package.mjs';
+import { countsPackages, normalizeAmount, normalizeRequestedQuantity } from './smartcart-package.mjs';
 import { assertItemContext, createItemContext, exactStoreKey, hasConfirmedRequirements } from './smartcart-pipeline-context.mjs';
 
 const DEFAULT_PREMIUM_PERCENT = 15;
@@ -89,10 +89,13 @@ function makePackagedProducts(file, store, target, preferences) {
     if (typeof o.productId !== 'string' || !o.productId.trim()) continue;
     if (!Number.isFinite(o.listedPriceIls) || o.listedPriceIls <= 0) continue;
     const p = quantityTicks(o.package?.quantity, o.package?.unit);
-    if (!p || (target && p.family !== target.family)) continue;
-    if (target?.maxTicks != null && p.ticks > target.maxTicks) continue;
+    // "2 packs" or "3 units" of liter cartons counts whole sale packages: each package is one unit.
+    const perPackage = Boolean(target && countsPackages(file.item.quantity?.unit, p, o.package?.isWeighted));
+    if (!p || (target && !perPackage && p.family !== target.family)) continue;
+    const ticks = perPackage ? 1000 : p.ticks;
+    if (target?.maxTicks != null && ticks > target.maxTicks) continue;
     const product = {
-      ...o, ticks: p.ticks, baseUnit: p.base,
+      ...o, ticks, baseUnit: perPackage ? 'units' : p.base,
       costCents: toCents(o.listedPriceIls), mask: preferenceMask(o, preferences)
     };
     if (!Number.isSafeInteger(product.costCents) || product.costCents <= 0) continue;

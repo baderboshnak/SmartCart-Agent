@@ -89,7 +89,7 @@ test('QA 98 dietary shopping rejects contradictory and unproven labels through t
     catalogOffer('unknown-yogurt', 'יוגורט ללא תוספת סוכר 150 גרם', { size: 150, unit: 'g', price: 1 })
   ];
   const run = (items, catalog) => pipeline(items, catalog, (candidate, item) =>
-    decision(candidate.id, { checks: [claim(item.requirements[0], candidate.name)] }));
+    decision(candidate, { checks: [claim(item.requirements[0], candidate.name)] }));
   const { matched, result } = await run(plan, offered);
   assert.deepEqual(matched.map(row => [row.matches.length, row.rejected.length, row.uncertain.length]),
     [[1, 1, 0], [1, 1, 0], [1, 0, 1]]);
@@ -120,7 +120,7 @@ test('QA 99 hard Gad and optional Tnuva stay with their original items', async (
     const checks = item.requirements.map(value => claim(value, candidate.manufacturer, {
       kind: 'BRAND', source: 'MANUFACTURER', result: candidate.id === 'gad-cheese' ? 'MET' : 'CONTRADICTED'
     }));
-    return decision(candidate.id, { checks, preferences: candidate.id === 'tnuva-milk' ? ['Tnuva'] : [] });
+    return decision(candidate, { checks, preferences: candidate.id === 'tnuva-milk' ? ['Tnuva'] : [] });
   });
   assert.deepEqual(matched[0].rejected.map(row => row.product._id), ['tnuva-cheese']);
   assert.deepEqual(matched[1].matches.map(row => row.preferencesMet), [['Tnuva'], []]);
@@ -151,7 +151,7 @@ test('QA 101, 108–110 network interruption resumes completed work and a new it
       offline.code = 'ENETUNREACH';
       throw offline;
     }
-    return { decisions: [decision(candidate.id)] };
+    return { decisions: [decision(candidate)] };
   };
   await assert.rejects(runMatchWithCheckpoint({
     ...setup, callModel: async ({ prompt }) => send(prompt, 'b')
@@ -177,7 +177,7 @@ test('QA 103 missing product gives an explicit incomplete-store result', async (
   const rows = [raw('milk', 'milk', 'חלב'), raw('moon cereal', 'moon cereal', 'קורנפלקס')];
   const plan = await understandShoppingRequest('I want milk and moon cereal.', { callModel: mockExtraction(rows) });
   const offers = [catalogOffer('milk', 'חלב 1 ליטר', { size: 1, unit: 'l' })];
-  const { matched, result } = await pipeline(plan, offers, candidate => decision(candidate.id));
+  const { matched, result } = await pipeline(plan, offers, candidate => decision(candidate));
   assert.equal(matched[1].totalCandidates, 0);
   assert.equal(result.recommendedBasket, null);
   assert.equal(result.noCompleteBasket, true);
@@ -199,7 +199,7 @@ test('QA 106 processes 20 different grocery items with complete candidate and ba
   let calls = 0;
   const { matched, result } = await pipeline(plan, offers, candidate => {
     calls++;
-    return decision(candidate.id);
+    return decision(candidate);
   });
   assert.equal(plan.items.length, 20);
   assert.ok(matched.every(record => record.matches.length + record.rejected.length + record.uncertain.length === record.totalCandidates));
@@ -301,7 +301,7 @@ test('gluten-free recipe flows through search, independent mandatory matching, a
     catalogOffer('unsafe-dough', 'בצק לפיצה מכיל גלוטן 500 גרם', { size: 500, unit: 'g', price: 1 })
   ];
   const { matched, result } = await pipeline(plan, offers, (candidate, item) =>
-    decision(candidate.id, { checks: item.requirements.map(value => claim(value, candidate.name)) }));
+    decision(candidate, { checks: item.requirements.map(value => claim(value, candidate.name)) }));
   assert.equal(matched[0].rejected[0].product._id, 'unsafe-dough');
   assert.equal(result.recommendedBasket.totalPriceIls, 28);
   assertBasketInvariants(result.recommendedBasket, plan, offers);

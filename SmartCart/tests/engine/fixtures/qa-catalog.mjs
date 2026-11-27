@@ -34,8 +34,21 @@ export function claim(requirement, evidence = requirement, {
   return { requirement, kind, result, evidenceSource: source, evidence };
 }
 
-export function decision(id, { identity = 'MATCH', checks = [], preferences = [] } = {}) {
-  return { id, identity, requirementChecks: checks, reason: 'Local fixture', preferencesMet: preferences };
+const RELATION_FOR = { MATCH: 'SAME_PRODUCT', NO_MATCH: 'RELATED_DIFFERENT', UNCERTAIN: 'UNCLEAR' };
+
+/**
+ * A Gemini-shaped matcher decision. Pass the product (or { id, name }) so the identity
+ * quote comes from its name; a bare ID needs `evidence` for a confirmed MATCH.
+ */
+export function decision(target, {
+  identity = 'MATCH', checks = [], preferences = [], relation = RELATION_FOR[identity],
+  evidence, candidate = 'Local fixture'
+} = {}) {
+  const product = typeof target === 'string' ? { id: target } : target;
+  return {
+    id: product.id ?? product._id, candidate, identityEvidence: evidence ?? product.name ?? '',
+    relation, identity, requirementChecks: checks, preferencesMet: preferences
+  };
 }
 
 export function submittedCandidates(prompt) {

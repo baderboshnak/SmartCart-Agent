@@ -1,5 +1,5 @@
 import type { Content } from '@google/genai';
-import type { CallModel } from '@engine/smartcart-matcher.mjs';
+import { READING_DECLARATION, type CallModel } from '@engine/smartcart-matcher.mjs';
 import type { AgentModel, AgentModelRequest, ModelTurn } from '@/lib/agent/gemini';
 
 /** Product codes that the controlled matcher accepts per requested product (as in the legacy pipeline tests). */
@@ -28,8 +28,14 @@ export function parseMatcherPrompt(prompt: string) {
  */
 export function createFakeMatcher(options: { codes?: Record<string, Set<string>>; identity?: (product: string, candidate: PromptCandidate) => boolean } = {}) {
   const codes = options.codes ?? MATCHING_CODES;
-  const stats = { calls: 0, candidates: 0 };
-  const callModel: CallModel = async ({ prompt }) => {
+  const stats = { calls: 0, candidates: 0, readings: 0 };
+  const callModel: CallModel = async ({ prompt, declaration }) => {
+    if (declaration.name === READING_DECLARATION.name) {
+      // The once-per-item reading of the request, before any candidate is checked.
+      stats.readings++;
+      const product = JSON.parse(/^Product wanted: (.*)$/mu.exec(prompt)?.[1] ?? '""') as string;
+      return { wanted: `${product} (controlled reading)`, notWanted: [] };
+    }
     stats.calls++;
     const { product, requirements, preferences, candidates } = parseMatcherPrompt(prompt);
     stats.candidates += candidates.length;
@@ -53,9 +59,11 @@ export function createFakeMatcher(options: { codes?: Record<string, Set<string>>
         });
         return {
           id: candidate.id,
+          candidate: 'Controlled test decision',
+          identityEvidence: candidate.name,
+          relation: matches ? 'SAME_PRODUCT' : 'RELATED_DIFFERENT',
           identity: matches ? 'MATCH' : 'NO_MATCH',
           requirementChecks,
-          reason: 'Controlled test decision',
           preferencesMet: matches && tnuva ? preferences.filter(preference => /tnuva/iu.test(preference)) : []
         };
       })

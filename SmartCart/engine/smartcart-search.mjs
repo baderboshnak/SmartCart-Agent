@@ -32,6 +32,14 @@ export function tokenize(value) {
   return normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
+/**
+ * Catalog names are Hebrew, with digits and some Latin brand words. A search phrase with Arabic
+ * letters ("جبנת קשקבל", Gemini mixing scripts) can never match one.
+ */
+export function isCatalogSearchTerm(term) {
+  return typeof term === 'string' && !/[؀-ۿݐ-ݿࢠ-ࣿ]/u.test(term);
+}
+
 /** Index the JSON records in memory. Keep original records unchanged. */
 export function buildCatalog(products) {
   if (!Array.isArray(products)) {
@@ -42,16 +50,53 @@ export function buildCatalog(products) {
     .map(product => ({ product, words: tokenize(product.name) }));
 }
 
+const FINAL_LETTERS = new Map([['כ', 'ך'], ['מ', 'ם'], ['נ', 'ן'], ['פ', 'ף'], ['צ', 'ץ']]);
+const REGULAR_LETTERS = new Map([...FINAL_LETTERS].map(([regular, final]) => [final, regular]));
+const HEBREW_WORD = /^[א-ת]+$/u;
+const withFinal = stem => stem.slice(0, -1) + (FINAL_LETTERS.get(stem.at(-1)) ?? stem.at(-1));
+const withRegular = word => word.slice(0, -1) + (REGULAR_LETTERS.get(word.at(-1)) ?? word.at(-1));
+
+/**
+ * Other singular and plural forms of a Hebrew search word, so either form finds the other:
+ * "עגבניה" and "עגבניות", "בצלים" and "בצל", "ביצה" and "ביצים", "לימון" and "לימונים".
+ * Stems of 4+ letters match the start of a name word, like every 4+ letter search word.
+ * Shorter stems list whole words only, so "פסטה" does not also find "פסטו".
+ */
+export function hebrewWordForms(word) {
+  const forms = { prefixes: [], exact: [] };
+  if (!HEBREW_WORD.test(word)) return forms;
+  const suffix = ['ים', 'ות', 'ה', 'י'].find(ending => word.endsWith(ending) && word.length - ending.length >= 3);
+  if (suffix) {
+    // Spelling with a doubled letter ("עגבנייה") shares the stem of "עגבניה".
+    const stem = word.slice(0, -suffix.length).replace(/יי/gu, 'י').replace(/וו/gu, 'ו');
+    if (stem.length >= 4) forms.prefixes.push(stem, withFinal(stem));
+    else if (suffix === 'ה') forms.exact.push(`${stem}ים`, `${stem}ות`, `${stem}י`);
+    else if (suffix !== 'י') forms.exact.push(withFinal(stem), `${stem}ה`, `${stem}י`, stem + (suffix === 'ים' ? 'ות' : 'ים'));
+  } else if (word.length >= 4 && withRegular(word) !== word) {
+    forms.prefixes.push(withRegular(word));
+  } else if (word.length === 3) {
+    forms.exact.push(`${withRegular(word)}ים`, `${withRegular(word)}ות`);
+  }
+  const prefixes = [...new Set(forms.prefixes)].filter(prefix => prefix !== word);
+  return { prefixes, exact: [...new Set(forms.exact)].filter(form => form !== word && !prefixes.some(prefix => form.startsWith(prefix))) };
+}
+
+/** One search word against one product-name word. */
+export function wordMatches(nameWord, term) {
+  if (nameWord === term || (term.length >= 4 && nameWord.startsWith(term))) return true;
+  const { prefixes, exact } = hebrewWordForms(term);
+  return exact.includes(nameWord) || prefixes.some(prefix => nameWord.startsWith(prefix));
+}
+
 /**
  * A search phrase matches when every word in it appears in the product name.
  * A word may also match the START of a longer product-name word, but only for
  * queries with at least 4 characters (to avoid excessive short-word matches).
+ * A Hebrew word also matches its other singular and plural forms (hebrewWordForms).
  * Multiple search phrases are alternatives (OR), maximizing recall.
  */
 function phraseMatches(nameWords, phraseWords) {
-  return phraseWords.every(term => nameWords.some(word =>
-    word === term || (term.length >= 4 && word.startsWith(term))
-  ));
+  return phraseWords.every(term => nameWords.some(word => wordMatches(word, term)));
 }
 
 /** Return ALL matching products, without scores, ranking, or a fixed limit. */

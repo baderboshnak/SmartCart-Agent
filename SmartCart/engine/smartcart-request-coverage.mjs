@@ -44,12 +44,15 @@ const ARABIC_UNITS = new Map([
   ['غ', 'g'], ['غرام', 'g'], ['غرامات', 'g'], ['جرام', 'g'], ['جرامات', 'g'],
   ['كغ', 'kg'], ['كجم', 'kg'], ['كيلو', 'kg'], ['كيلوغرام', 'kg'], ['كيلوجرام', 'kg'],
   ['وحدة', 'units'], ['وحدات', 'units'], ['قطعة', 'units'], ['قطع', 'units'],
-  ['زجاجة', 'bottle'], ['زجاجات', 'bottle'], ['علبة', 'can'], ['علب', 'can'],
+  // علبة is any box, carton or tin (علبة شاي, علبة تونة), so it is a sale package, not a can.
+  ['زجاجة', 'bottle'], ['زجاجات', 'bottle'], ['علبة', 'pack'], ['علب', 'pack'],
   ['رغيف', 'loaf'], ['أرغفة', 'loaf'], ['كيس', 'bag'], ['أكياس', 'bag']
 ]);
 const DUAL_UNITS = new Map([
   ['لتران', 'l'], ['لترين', 'l'], ['ليتران', 'l'], ['ليترين', 'l'],
-  ['كيلوان', 'kg'], ['كيلوين', 'kg'], ['كيلوغرامان', 'kg'], ['كيلوغرامين', 'kg']
+  ['كيلوان', 'kg'], ['كيلوين', 'kg'], ['كيلوغرامان', 'kg'], ['كيلوغرامين', 'kg'],
+  ['علبتان', 'pack'], ['علبتين', 'pack'], ['زجاجتان', 'bottle'], ['زجاجتين', 'bottle'],
+  ['كيسان', 'bag'], ['كيسين', 'bag'], ['رغيفان', 'loaf'], ['رغيفين', 'loaf']
 ]);
 const WORD_AMOUNTS = new Map([
   ['zero', 0], ['אפס', 0], ['half a', 0.5], ['half an', 0.5], ['half', 0.5], ['חצי', 0.5],
@@ -59,8 +62,18 @@ const WORD_AMOUNTS = new Map([
   ['five', 5], ['חמישה', 5], ['חמש', 5], ['six', 6], ['שישה', 6], ['שש', 6],
   ['seven', 7], ['שבעה', 7], ['שבע', 7], ['eight', 8], ['שמונה', 8],
   ['nine', 9], ['תשעה', 9], ['תשע', 9], ['ten', 10], ['עשרה', 10], ['עשר', 10],
-  ['eleven', 11], ['twelve', 12], ['a dozen', 12], ['dozen', 12], ['תריסר', 12]
+  ['eleven', 11], ['twelve', 12], ['a dozen', 12], ['dozen', 12], ['תריסר', 12],
+  ['نص', 0.5], ['نصف', 0.5], ['واحد', 1], ['واحدة', 1],
+  ['اثنين', 2], ['اثنان', 2], ['إثنين', 2], ['تنين', 2],
+  ['ثلاث', 3], ['ثلاثة', 3], ['تلات', 3], ['تلاتة', 3], ['أربع', 4], ['أربعة', 4], ['اربع', 4], ['اربعة', 4],
+  ['خمس', 5], ['خمسة', 5], ['ست', 6], ['ستة', 6], ['سبع', 7], ['سبعة', 7],
+  ['ثماني', 8], ['ثمانية', 8], ['تماني', 8], ['تمانية', 8], ['تسع', 9], ['تسعة', 9],
+  ['عشر', 10], ['عشرة', 10], ['دزينة', 12]
 ]);
+// "ליטר וחצי", "2 kilos and a half", "كيلو ونص": the half after a unit adds 0.5.
+// The joined "and" may already be blanked by withoutJoinedAnd.
+const HALF_SUFFIX = /^\s*(?:ו?\s*חצי|and\s+a\s+half|و?\s*نصف?)(?![\p{L}\p{M}])/iu;
+const UNIT_TOKEN = /[\p{L}\p{M}][\p{L}\p{M}'׳"״.]*/gu;
 const AMOUNT_WORDS = [...WORD_AMOUNTS.keys()].sort((a, b) => b.length - a.length).join('|').replace(/ /g, '\\s+');
 const AMOUNT_NUMBER = String.raw`[+−-]?(?:${DIGIT}+(?:\s+${DIGIT}+)?\s*\/\s*${DIGIT}+|${DECIMAL})`;
 const UNIT_LABEL = String.raw`[\p{L}'׳"״.]+`;
@@ -90,6 +103,46 @@ const normalizeSourceAmount = (amount, unit) => normalizeAmount(amount, sourceUn
 
 function normalizeNumericText(text) {
   return text.replace(/[٠-٩۰-۹]/gu, digit => String(digit.codePointAt(0) % 16)).replace(/٫/gu, '.');
+}
+
+const isAmountWord = word => WORD_AMOUNTS.has(word) || DUAL_UNITS.has(word);
+
+/** A number word, a dual like "علبتين", or a unit word, with or without a joined "and" (ו, و). */
+function isQuantityWord(word) {
+  const value = canonical(word);
+  if (isAmountWord(value) || parseSourceUnit(word)) return true;
+  const rest = value.replace(/^(?:ו|و)/u, '');
+  return rest !== value && rest.length > 1 && (isAmountWord(rest) || Boolean(parseSourceUnit(rest)));
+}
+
+/**
+ * Blank the "and" joined to an amount ("וחצי קילו", "וקילו", "و٢") so amount patterns see the
+ * amount itself. Same length, so positions in the text stay valid.
+ */
+function withoutJoinedAnd(text) {
+  return text.replace(/(?<![\p{L}\p{M}\p{N}])(?:ו|و)[-־ـ]?(?=(\p{N}|[\p{L}\p{M}][\p{L}\p{M}'׳"״.]*))/gu, (prefix, next) =>
+    /\p{N}/u.test(next) || isQuantityWord(next) && !parseSourceUnit(prefix + next) && !isAmountWord(canonical(prefix + next))
+      ? ' '.repeat(prefix.length) : prefix);
+}
+
+/**
+ * A unit word written without a number ("קילו עגבניות", "חלב ליטר", "بدي لتر حليب").
+ * Words in the product name or a recorded qualifier do not count. Short aliases such as
+ * "לי" (also "me") are ignored.
+ */
+function bareUnit(source, item, identity) {
+  const covered = [identity, ...item.constraintEvidence.map(evidence => evidencePosition(item.sourceText, evidence.sourceText))]
+    .filter(Boolean);
+  for (const token of source.matchAll(UNIT_TOKEN)) {
+    const start = token.index;
+    const end = start + token[0].length;
+    if (covered.some(span => start < span.end && end > span.start)) continue;
+    if (new RegExp(String.raw`${DIGIT}\s*$`, 'u').test(source.slice(0, start))) continue;
+    const label = token[0].replace(/[.]+$/u, '');
+    if (label.length < 3 || canonical(label) === 'each' || !parseSourceUnit(label)) continue;
+    return { text: label, start, end: start + label.length };
+  }
+  return null;
 }
 
 function assertGap(text, position, leading) {
@@ -214,8 +267,7 @@ export function assertProductPhrase(item, index) {
       .replace(/(?<!\p{L})(?:ו|و)[-־ـ]?(?=\p{N})/gu, '')
       .replace(OPTIONAL_CUE, ' ').replace(MANDATORY_CUE, ' '));
     if (remainder.some(word => /\p{L}/u.test(word) && !DETAIL_WORD.test(word) && !SEPARATOR.test(word) &&
-        !WORD_AMOUNTS.has(canonical(word)) && !DUAL_UNITS.has(canonical(word)) &&
-        !parseSourceUnit(word) && !LEAD_IN.test(word))) {
+        !isQuantityWord(word) && !LEAD_IN.test(word))) {
       throw new Error(`Item ${index + 1} has unassigned product or qualifier wording: ${JSON.stringify(detail.trim())}. Verify each product has its own item and all attributes are recorded.`);
     }
     start = end + boundary[0].length;
@@ -275,33 +327,38 @@ function assertComponentSize(item, unit, followingText, index) {
 }
 
 export function assertRequestedQuantity(item, index) {
-  const source = item.sourceText;
-  const range = requestedRange(source);
+  const original = item.sourceText;
+  const range = requestedRange(original);
   if (range) {
     assertQuantityRange(range, item.quantity, index);
     assertComponentSize(item, containerType(sourceUnit(range.groups.lastUnit)),
-      source.slice(range.index + range[0].length), index);
+      original.slice(range.index + range[0].length), index);
     return;
   }
   if (item.quantity?.maxAmount !== undefined) {
     throw new Error(`Item ${index + 1} has a quantity range that wasn't specified in the request.`);
   }
+  const source = withoutJoinedAnd(original);
+  const actual = normalizeAmount(item.quantity?.amount, item.quantity?.unit);
+  const unspecified = item.quantity?.amount === 0;
   const dual = DUAL_PREFIX.exec(source)?.groups.dual;
   if (dual) {
-    const expected = normalizeAmount(2, DUAL_UNITS.get(dual));
-    const actual = normalizeAmount(item.quantity?.amount, item.quantity?.unit);
-    if (actual?.family !== expected.family || actual.amountBase !== expected.amountBase) {
-      throw new Error(`Item ${index + 1} changes the explicit quantity ${JSON.stringify(dual)}.`);
+    const dualUnit = DUAL_UNITS.get(dual);
+    const expected = normalizeAmount(2, dualUnit);
+    const container = containerType(dualUnit);
+    if (actual?.family !== expected.family || actual.amountBase !== expected.amountBase ||
+        (container && item.quantity.unit !== container)) {
+      throw new Error(`Item ${index + 1} changes the explicit quantity ${JSON.stringify(dual)}.${quantityHint(2, dualUnit)}`);
     }
     return;
   }
-  const identity = typeof item.product === 'string' && evidencePosition(source, item.product.trim());
+  const identity = typeof item.product === 'string' && evidencePosition(original, item.product.trim());
   const prefix = AMOUNT_PREFIX.exec(source);
   const prefixAmount = prefix?.groups.number ?? prefix?.groups.word;
   const bareCount = prefix && !/^(?:a|an)$/iu.test(prefixAmount) &&
     (!identity || identity.start >= prefix[0].indexOf(prefixAmount) + prefixAmount.length);
   const overlapsQualifier = match => item.constraintEvidence.some(evidence => {
-    const span = evidencePosition(source, evidence.sourceText);
+    const span = evidencePosition(original, evidence.sourceText);
     return span && match.index >= span.start && match.index + match[0].trimEnd().length <= span.end;
   });
   const match = prefix && (parseSourceUnit(prefix.groups.unit) || bareCount) ? prefix
@@ -309,7 +366,12 @@ export function assertRequestedQuantity(item, index) {
       parseSourceUnit(candidate.groups.unit) &&
       !overlapsQualifier(candidate));
   if (!match) {
-    if (item.quantity?.amount !== 0) {
+    const bare = bareUnit(source, item, identity);
+    if (bare) {
+      assertBareUnit(item, source, bare, { actual, unspecified }, index);
+      return;
+    }
+    if (!unspecified) {
       throw new Error(`Item ${index + 1} has a quantity that wasn't specified in the request.`);
     }
     return;
@@ -319,16 +381,46 @@ export function assertRequestedQuantity(item, index) {
   const explicitUnit = parseSourceUnit(match.groups.unit);
   // An audit has no product field to distinguish a bare count from "7 Up".
   if (!explicitUnit && !identity) return;
-  const amount = number ? numericAmount(number) : WORD_AMOUNTS.get(canonical(word));
+  const end = match.index + match[0].length;
+  const half = explicitUnit ? HALF_SUFFIX.exec(source.slice(end)) : null;
+  const amount = (number ? numericAmount(number) : WORD_AMOUNTS.get(canonical(word))) + (half ? 0.5 : 0);
   const unit = containerType(sourceUnit(match.groups.unit));
   const expected = normalizeSourceAmount(amount, explicitUnit ? match.groups.unit : 'units');
-  const actual = normalizeAmount(item.quantity?.amount, item.quantity?.unit);
-  if (!expected || actual?.family !== expected.family || actual?.amountBase !== expected.amountBase ||
-      (unit && item.quantity.unit !== unit)) {
-    throw new Error(`Item ${index + 1} changes the explicit quantity ${JSON.stringify(explicitUnit ? match[0].trim() : amountText)}.`);
+  // "a box of tea" or "a bottle of water": one package is what an unspecified amount buys anyway.
+  const oneContainer = unit && amount === 1 && unspecified;
+  if (!oneContainer && (!expected || actual?.family !== expected.family || actual?.amountBase !== expected.amountBase ||
+      (unit && item.quantity.unit !== unit))) {
+    const written = explicitUnit ? original.slice(match.index, end + (half ? half[0].length : 0)).trim() : amountText;
+    throw new Error(`Item ${index + 1} changes the explicit quantity ${JSON.stringify(written)}.${quantityHint(amount, explicitUnit ? match.groups.unit : 'units')}`);
   }
 
-  assertComponentSize(item, unit, source.slice(match.index + match[0].length), index);
+  assertComponentSize(item, unit, source.slice(end + (half ? half[0].length : 0)), index);
+}
+
+/** The quantity the wording states, so the agent can correct its call in one retry. */
+function quantityHint(amount, unit) {
+  const shopUnit = containerType(sourceUnit(unit)) ?? parseSourceUnit(unit)?.aliases[0];
+  return shopUnit && Number.isFinite(amount) ? ` Use amount ${amount}, unit "${shopUnit}".` : '';
+}
+
+/** A unit word without a number means one of it, or one and a half with "וחצי" after it. */
+function assertBareUnit(item, source, bare, { actual, unspecified }, index) {
+  const half = HALF_SUFFIX.exec(source.slice(bare.end));
+  const end = bare.end + (half ? half[0].length : 0);
+  const unit = sourceUnit(bare.text);
+  const container = containerType(unit);
+  // A container or count word may be plural ("bottles of water", "علب تونة"), so no amount is fine too.
+  // A measure word is singular in practice: "קילו עגבניות" is one kilo, as "a kilo" is.
+  if (unspecified && !half && parseSourceUnit(bare.text)?.family === 'count') {
+    assertComponentSize(item, container, source.slice(end), index);
+    return;
+  }
+  const expected = normalizeAmount(half ? 1.5 : 1, unit);
+  if (!expected || actual?.family !== expected.family || actual.amountBase !== expected.amountBase ||
+      (container && item.quantity.unit !== container)) {
+    throw new Error(`Item ${index + 1} changes the explicit quantity ${JSON.stringify(item.sourceText.slice(bare.start, end).trim())}.${quantityHint(half ? 1.5 : 1, unit)}`);
+  }
+  assertComponentSize(item, container, source.slice(end), index);
 }
 
 export function assertGroceryRequest(request) {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { ValidationError } from '@/lib/shared/errors';
 import {
-  assertNoUnassignedDetails, assertUserQuote, findMention, isVagueProductRequest, validateConstraintUpdate, validateDirectItems, validateQuantity,
+  asksWhichVersion, assertNoUnassignedDetails, assertUserQuote, findMention, isVagueProductRequest, validateConstraintUpdate, validateDirectItems, validateQuantity,
   validateRecipePlan
 } from '@/lib/shopping/request-items';
 import { cartItem } from '../helpers/fixtures';
@@ -161,6 +161,50 @@ describe('30. recipe ingredient plans', () => {
     assert.throws(() => validateRecipePlan({ ...plan, ingredients: [{ ...plan.ingredients[0]!, coreSearchTerm: 'flour' }] }, plan.requestText), /Hebrew/u);
     assert.throws(() => validateRecipePlan({ ...plan, ingredients: [{ ...plan.ingredients[4]! }] }, plan.requestText), /required ingredient/u);
     assert.throws(() => validateRecipePlan({ ...plan, servings: 0 }, plan.requestText), /servings/u);
+  });
+
+  test('corrects near-miss recipe amounts instead of refusing the plan', () => {
+    const amounts = (quantity: { amount: number; unit: string }) =>
+      validateRecipePlan({ ...plan, ingredients: [{ ...plan.ingredients[0]!, quantity }] }, plan.requestText).ingredients[0]!.quantity;
+    assert.deepEqual(amounts({ amount: 2, unit: 'unspecified' }), { amount: 0, unit: 'unspecified' });
+    assert.deepEqual(amounts({ amount: 0, unit: 'g' }), { amount: 0, unit: 'unspecified' });
+    assert.deepEqual(amounts({ amount: 0.5, unit: 'units' }), { amount: 1, unit: 'units' });
+    assert.deepEqual(amounts({ amount: 300, unit: 'g' }), { amount: 300, unit: 'g' });
+    // A container in Gemini's plan is a count of sale packages; catalog records rarely say "bag".
+    assert.deepEqual(amounts({ amount: 1, unit: 'bag' }), { amount: 1, unit: 'pack' });
+    assert.deepEqual(amounts({ amount: 2, unit: 'bottle' }), { amount: 2, unit: 'pack' });
+  });
+
+  test('a named product is not questioned about its type, but a vague request or a category is', () => {
+    for (const [question, message] of [
+      ['Which type of chicken would you prefer?', 'I want chicken.'],
+      ['What brand of milk do you want?', 'add milk'],
+      ['איזה סוג עוף תרצה?', 'אני רוצה עוף'],
+      ['באיזה אחוז שומן?', 'גבינה לבנה'],
+      ['أي نوع جبنة بدك؟', 'بدي جبنة']
+    ]) assert.ok(asksWhichVersion(question!, message!), `${message} → ${question}`);
+    for (const [question, message] of [
+      ['Which product did you have in mind?', 'I want chicken.'],
+      ['What kind of chocolate treat would you like?', 'I want something chocolatey'],
+      ['איזה סוג של מוצרים טבעוניים תרצו?', 'מוצרים טבעוניים'],
+      ['What type of drink would you like?', 'I want a drink'],
+      ['איזה סוג בשר?', 'אני רוצה בשר'],
+      ['أي نوع مشروب؟', 'بدي مشروب']
+    ]) assert.ok(!asksWhichVersion(question!, message!), `${message} → ${question}`);
+  });
+
+  test('search words with Arabic letters are dropped, since catalog names are Hebrew', () => {
+    const terms = (searchTerms: string[]) =>
+      validateRecipePlan({ ...plan, ingredients: [{ ...plan.ingredients[0]!, searchTerms }] }, plan.requestText).ingredients[0]!.searchTerms;
+    assert.deepEqual(terms(['קמח לבן', 'جبנת קשקבל', 'طحين']), ['קמח', 'קמח לבן']);
+    assert.throws(() => validateRecipePlan({ ...plan, ingredients: [{ ...plan.ingredients[0]!, coreSearchTerm: 'طحين קמח' }] }, plan.requestText), /Hebrew/u);
+  });
+
+  test('servings stated with a joined preposition count as explicit', () => {
+    for (const requestText of ['ארוחת ערב לארבעה אנשים', 'لأربعة أشخاص عشاء', 'dinner for four']) {
+      assert.doesNotThrow(() => validateRecipePlan({ ...plan, requestText, servings: 4, servingsSource: 'EXPLICIT' }, requestText), requestText);
+    }
+    assert.throws(() => validateRecipePlan({ ...plan, requestText: 'ארוחת ערב', servings: 4, servingsSource: 'EXPLICIT' }, 'ארוחת ערב'), /ASSUMED/u);
   });
 
   test('quantities are bounded and well-formed', () => {

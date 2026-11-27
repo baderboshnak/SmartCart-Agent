@@ -5,7 +5,8 @@ import type { GenerateContentResponse } from '@google/genai';
 import { describeGeminiError, isOverloadError, toModelTurn, type AgentModel } from '@/lib/agent/gemini';
 import { runAgentLoop, type AgentTool } from '@/lib/agent/loop';
 import { ModelError, ValidationError } from '@/lib/shared/errors';
-import { matchItemCandidates } from '@/lib/shopping/matching';
+import { READING_DECLARATION } from '@engine/smartcart-matcher.mjs';
+import { matchItemCandidates, type MatchRetry } from '@/lib/shopping/matching';
 import { fixtureSearch, referenceItems } from '../helpers/fixtures';
 import { functionCallTurn, lastToolResponses, scriptedModel, textTurn } from '../helpers/fake-models';
 import { engineItemCore } from '@/lib/shopping/engine-items';
@@ -290,10 +291,13 @@ describe('31. invalid Gemini responses', () => {
   test('the matcher retries malformed decisions and never invents a match', async () => {
     const [milk] = referenceItems();
     const candidates = fixtureSearch(['חלב']).slice(0, 10);
+    // The request is read once before the batches; these checks are about the batch answers.
+    const reading = { wanted: 'Plain milk.', notWanted: [] };
     let calls = 0;
     await assert.rejects(matchItemCandidates(engineItemCore(milk!), candidates, {
       db: null, model: 'fake', batchSize: 10, concurrency: 1,
-      callModel: async () => {
+      callModel: async ({ declaration }) => {
+        if (declaration.name === READING_DECLARATION.name) return reading;
         calls++;
         return { decisions: [{ id: 'invented-product', identity: 'MATCH', requirementChecks: [], reason: '', preferencesMet: [] }] };
       }
@@ -301,15 +305,72 @@ describe('31. invalid Gemini responses', () => {
     assert.equal(calls, 4, 'bounded retries');
 
     let first = true;
+    const retries: MatchRetry[] = [];
     const recovered = await matchItemCandidates(engineItemCore(milk!), candidates, {
       db: null, model: 'fake', batchSize: 10, concurrency: 1,
-      callModel: async ({ prompt }) => {
+      onRetry: retry => retries.push(retry),
+      callModel: async ({ prompt, declaration }) => {
+        if (declaration.name === READING_DECLARATION.name) return reading;
         if (first) { first = false; return { nonsense: true }; }
         const ids = JSON.parse(prompt.slice(prompt.lastIndexOf('\nProducts: ') + 11)).map((row: { id: string }) => row.id);
-        return { decisions: ids.map((id: string) => ({ id, identity: 'UNCERTAIN', requirementChecks: [{ requirement: '3%', kind: 'OTHER', result: 'UNKNOWN', evidenceSource: 'NONE', evidence: '' }], reason: 'unsure', preferencesMet: [] })) };
+        return { decisions: ids.map((id: string) => ({ id, candidate: 'unsure', identityEvidence: '', relation: 'UNCLEAR', identity: 'UNCERTAIN', requirementChecks: [{ requirement: '3%', kind: 'OTHER', result: 'UNKNOWN', evidenceSource: 'NONE', evidence: '' }], preferencesMet: [] })) };
       }
     });
     assert.equal(recovered.results.matches.length, 0);
     assert.equal(recovered.results.uncertain.length + recovered.results.rejected.length, candidates.length);
+    assert.equal(retries.length, 1, 'the unusable answer is reported once');
+    assert.equal(retries[0]!.attempt, 1);
+    assert.equal(retries[0]!.missing, candidates.length);
+    assert.ok(retries[0]!.reason.length > 0, 'with the engine\'s reason');
+  });
+});
+
+describe('debug logging of each agent step', () => {
+  test('prints what Gemini decided, each tool\'s arguments and result, rejected arguments and an empty reply', async () => {
+    const details: Array<{ step: string; content: unknown; level?: string }> = [];
+    const trace = Object.assign(() => {}, {
+      mode: 'on' as const,
+      detail: (step: string, content: unknown, level?: string) => { details.push({ step, content, level }); }
+    });
+    const model = scriptedModel([
+      functionCallTurn([{ name: 'updateCart', args: { operations: [] } }]),
+      functionCallTurn([{ name: 'searchProducts', args: { query: ['חלב'] } }]),
+      { ...textTurn(''), finishReason: 'MALFORMED_FUNCTION_CALL', finishMessage: 'Malformed function call.', model: 'gemini-x' }
+    ]);
+    const outcome = await runAgentLoop({
+      model, tools: recordingTools([]), signal: new AbortController().signal, limits, trace,
+      systemInstruction: () => 'system', contents: [{ role: 'user', parts: [{ text: 'I want milk' }] }]
+    });
+    assert.equal(outcome.status, 'completed');
+
+    const decided = details.find(entry => /^turn 1: Gemini replied after \d+ ms$/u.test(entry.step));
+    assert.deepEqual((decided?.content as { toolCalls: unknown }).toolCalls, [{ tool: 'updateCart', arguments: { operations: [] } }]);
+    const rejected = details.find(entry => entry.step === 'tool updateCart: Gemini\'s arguments were rejected');
+    assert.equal(rejected?.level, 'warn');
+    assert.match(String((rejected?.content as { problem: string }).problem), /operations/u);
+    assert.deepEqual(details.find(entry => entry.step === 'tool searchProducts: called with')?.content, { query: ['חלב'] });
+    const result = details.find(entry => /^tool searchProducts: done in \d+ ms$/u.test(entry.step));
+    assert.deepEqual(result?.content, { summary: '3 products', result: { totalMatched: 3 } });
+    const empty = details.find(entry => /^turn 3: Gemini returned an empty reply after \d+ ms$/u.test(entry.step));
+    assert.equal(empty?.level, 'warn');
+    assert.deepEqual(empty?.content, {
+      model: 'gemini-x', finishReason: 'MALFORMED_FUNCTION_CALL', finishMessage: 'Malformed function call.', tokens: { in: 100, out: 30, thinking: 0 }
+    });
+  });
+
+  test('the time spent waiting for Gemini is counted, a failed turn included', async () => {
+    const wait = () => new Promise(resolve => setTimeout(resolve, 50));
+    const model = scriptedModel([
+      async () => { await wait(); return functionCallTurn([{ name: 'searchProducts', args: { query: ['חלב'] } }]); },
+      async () => { await wait(); return textTurn('done'); }
+    ]);
+    const outcome = await run(model, recordingTools([]));
+    assert.equal(outcome.status, 'completed');
+    assert.ok(outcome.modelMs >= 60, `two 50 ms turns took ${outcome.modelMs} ms`);
+
+    const broken: AgentModel = { name: 'broken', generate: async () => { await wait(); throw new Error('bad request'); } };
+    const failed = await run(broken, recordingTools([]));
+    assert.equal(failed.status, 'failed');
+    assert.ok(failed.modelMs >= 30, `the failed turn counts (${failed.modelMs} ms)`);
   });
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { tokenize } from '@engine/smartcart-search.mjs';
+import { searchCatalog, tokenize, wordMatches } from '@engine/smartcart-search.mjs';
 import { buildSearchFilter, searchPhrases } from '@/lib/db/products.repository';
 import { ExtractedItemSchema, UpdateCartArgsSchema, UpdateCartDeclarationSchema, toGeminiSchema } from '@/lib/agent/schemas';
 import { toFunctionDeclarations } from '@/lib/agent/loop';
@@ -81,12 +81,33 @@ describe('MongoDB search filter', () => {
   test('mirrors the engine: exact tokens under 4 characters, prefixes from 4, phrases ORed', () => {
     const filter = buildSearchFilter(searchPhrases(['חלב', 'מוצרלה מגורדת']));
     assert.deepEqual(filter, { $or: [
-      { $and: [{ searchTokens: 'חלב' }] },
-      { $and: [{ searchTokens: { $regex: '^מוצרלה' } }, { searchTokens: { $regex: '^מגורדת' } }] }
+      { $and: [{ $or: [{ searchTokens: 'חלב' }, { searchTokens: { $in: ['חלבים', 'חלבות'] } }] }] },
+      { $and: [
+        { $or: [{ searchTokens: { $regex: '^מוצרלה' } }, { searchTokens: { $regex: '^מוצרל' } }] },
+        { searchTokens: { $regex: '^מגורדת' } }
+      ] }
     ] });
     const scoped = buildSearchFilter(searchPhrases(['ביצים']), ['shufersal:1:2:3']);
-    assert.deepEqual(scoped, { $and: [{ $and: [{ searchTokens: { $regex: '^ביצים' } }] }, { storeKey: { $in: ['shufersal:1:2:3'] } }] });
+    assert.deepEqual(scoped, { $and: [
+      { $and: [{ $or: [{ searchTokens: { $regex: '^ביצים' } }, { searchTokens: { $in: ['ביץ', 'ביצה', 'ביצי', 'ביצות'] } }] }] },
+      { storeKey: { $in: ['shufersal:1:2:3'] } }
+    ] });
+    assert.deepEqual(buildSearchFilter(searchPhrases(['milk'])), { $and: [{ searchTokens: { $regex: '^milk' } }] });
     assert.throws(() => buildSearchFilter([]), /search terms/u);
+  });
+
+  test('a Hebrew word also finds its other singular and plural forms, in both search engines', () => {
+    const finds: Array<[string, string]> = [
+      ['עגבניה', 'עגבניות'], ['עגבניות', 'עגבניה'], ['עגבנייה', 'עגבניות'], ['בצלים', 'בצל'], ['בצל', 'בצלים'],
+      ['ביצה', 'ביצים'], ['ביצים', 'ביצה'], ['לימון', 'לימונים'], ['מלפפונים', 'מלפפון'], ['תפוחים', 'תפוחי']
+    ];
+    for (const [term, name] of finds) assert.ok(wordMatches(name, term), `"${term}" should find "${name}"`);
+    // Short stems list whole words, so a different product that shares a stem is not found.
+    for (const [term, name] of [['פסטה', 'פסטו'], ['עוגה', 'עוגיות'], ['שמנת', 'שמן'], ['חלבה', 'חלב'], ['לחם', 'לחמניות']]) {
+      assert.ok(!wordMatches(name!, term!), `"${term}" should not find "${name}"`);
+    }
+    const catalog = [{ ...catalogFixture[0]!, name: 'עגבניות שרי 500 גרם' }];
+    assert.equal(searchCatalog(catalog, { searchTerms: ['עגבניה'] }).totalCandidates, 1);
   });
 
   test('tokenization splits attached numbers like the engine', () => {
@@ -133,10 +154,17 @@ describe('agent tool declarations', () => {
       }
     };
     const declarations = toFunctionDeclarations(createShoppingTools({} as never));
+    // One small tool per cart action. The combined updateCart stays callable but is not offered:
+    // its flat schema, with every field optional, made Gemini misplace fields.
     assert.deepEqual(declarations.map(declaration => declaration.name), [
-      'getCurrentCart', 'updateCart', 'searchProducts', 'matchProducts', 'calculatePurchaseOptions', 'optimizeBasket', 'compareStores', 'explainRecommendation', 'requestClarification'
+      'getCurrentCart', 'addItems', 'addRecipe', 'resizeShoppingPlan', 'removeItems', 'setQuantity', 'setConstraints', 'setSearchTerms',
+      'setShoppingMode', 'setBudget', 'selectStore', 'clearCart',
+      'searchProducts', 'matchProducts', 'calculatePurchaseOptions', 'optimizeBasket', 'compareStores', 'explainRecommendation', 'requestClarification'
     ]);
     for (const declaration of declarations) walk(declaration.parametersJsonSchema, declaration.name!);
+    // Tools that accept looser input declare the strict shape, not the preprocessing.
+    const declared = (name: string) => JSON.stringify(declarations.find(declaration => declaration.name === name)?.parametersJsonSchema);
+    assert.ok(declared('addItems').includes('"items"') && declared('addRecipe').includes('"ingredients"'));
     assert.ok(JSON.stringify(toGeminiSchema(UpdateCartDeclarationSchema)).includes('add_recipe'));
   });
 

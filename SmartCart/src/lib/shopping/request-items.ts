@@ -1,6 +1,7 @@
 import { validateShoppingPlan, type ValidatedPlanItem } from '@engine/smartcart-request-plan.mjs';
 import { REQUEST_UNITS, shoppingDetailsIn } from '@engine/smartcart-request-coverage.mjs';
-import { normalizeRequestedQuantity } from '@engine/smartcart-package.mjs';
+import { isCatalogSearchTerm } from '@engine/smartcart-search.mjs';
+import { CONTAINER_UNITS, normalizeRequestedQuantity } from '@engine/smartcart-package.mjs';
 import { isKnownBrand } from '@engine/smartcart-requirement-evidence.mjs';
 import { errorMessage, ValidationError } from '@/lib/shared/errors';
 import type { CartItem, ConstraintEvidence, Quantity } from '@/lib/shared/types';
@@ -75,7 +76,7 @@ export function assertNoUnassignedDetails(userMessage: string, requestText: stri
     throw new ValidationError(
       `Shopping details next to requestText are not assigned to any item: ${[...new Set(details.map(detail => JSON.stringify(detail.text)))].join(', ')}. ` +
       'Copy the complete wording of every item (amounts, percentages, brands, "preferably"/"only" clauses) into requestText, ' +
-      'or cover that wording with another operation in the same updateCart call.'
+      'or cover that wording with another tool call in the same turn (for example setBudget for "under ₪50").'
     );
   }
 }
@@ -102,6 +103,33 @@ const VAGUE_PRODUCT = new RegExp(
 /** True when the wording asks for an unspecified product instead of naming one. */
 export function isVagueProductRequest(text: string): boolean {
   return VAGUE_PRODUCT.test(text);
+}
+
+// A question about which version of a product: "Which type of chicken?", "What brand?",
+// "איזה סוג עוף?", "أي نوع جبنة؟".
+const VERSION_QUESTION = new RegExp(String.raw`(?<![\p{L}])(?:${[
+  String.raw`(?:which|what)\s+(?:types?|kinds?|sorts?|brands?|flavou?rs?|sizes?|variet(?:y|ies)|cuts?|fat\s+(?:level|content|percentage))`,
+  String.raw`(?:preferred|particular|specific)\s+(?:types?|kinds?|brands?|flavou?rs?|sizes?|variet(?:y|ies))`,
+  String.raw`[במ]?(?:איזה|איזו|אילו)\s+(?:סוג|סוגי|מותג|טעם|גודל|אחוז|אחוזי)`,
+  String.raw`אחוזי?\s+שומן`,
+  String.raw`(?:أي|اي|شو|ايش|ما)\s+(?:نوع|ماركة|علامة|نكهة|حجم|طعم)`,
+  String.raw`نسبة\s+(?:الدسم|الدهون)`
+].join('|')})(?![\p{L}])`, 'iu');
+
+// General categories, where asking which product is right: "a drink", "meat", "vegan products".
+const CATEGORY_REQUEST = new RegExp(String.raw`(?<![\p{L}])(?:${[
+  String.raw`[ושהבלמכ]{0,2}(?:שתייה|שתיה|משקה|משקאות|חטיף|חטיפים|נשנוש|נשנושים|אוכל|בשר|דג|דגים|פרי|פירות|ירק|ירקות|קינוח|קינוחים|ממתק|ממתקים|מתוקים|מוצר|מוצרים|מוצרי)`,
+  String.raw`drinks?|beverages?|snacks?|food|meat|fish|fruits?|vegetables?|veggies|desserts?|sweets|cand(?:y|ies)|dairy|groceries|products?|items?`,
+  String.raw`و?(?:مشروب|مشروبات|سناك|تسالي|أكل|اكل|لحمة|لحم|سمك|فواكه|فاكهة|خضار|خضرة|حلويات|حلو|منتج|منتجات|أغراض|اغراض)`
+].join('|')})(?![\p{L}])`, 'iu');
+
+/**
+ * True when a clarifying question asks which type, kind, brand, size or flavor of a product the
+ * customer already named ("I want chicken" → "Which type of chicken?"). A named product is enough:
+ * matching chooses among the catalog's versions. A vague request or a general category may be asked about.
+ */
+export function asksWhichVersion(question: string, message: string): boolean {
+  return VERSION_QUESTION.test(question) && !isVagueProductRequest(message) && !CATEGORY_REQUEST.test(message);
 }
 
 export function validateDirectItems(
@@ -159,15 +187,70 @@ export function validateQuantity(quantity: { amount: number; unit: string; maxAm
 
 const NUMBER_WORDS = new Map([
   ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5], ['six', 6], ['seven', 7], ['eight', 8], ['nine', 9], ['ten', 10],
-  ['twelve', 12], ['dozen', 12], ['אחד', 1], ['אחת', 1], ['שניים', 2], ['שתיים', 2], ['שני', 2], ['שתי', 2], ['שלושה', 3], ['שלוש', 3],
-  ['ארבעה', 4], ['ארבע', 4], ['חמישה', 5], ['חמש', 5], ['שישה', 6], ['שש', 6], ['שבעה', 7], ['שבע', 7], ['שמונה', 8], ['עשרה', 10], ['עשר', 10],
-  ['اثنين', 2], ['ثلاثة', 3], ['أربعة', 4], ['خمسة', 5], ['ستة', 6]
+  ['eleven', 11], ['twelve', 12], ['dozen', 12], ['twenty', 20],
+  ['אחד', 1], ['אחת', 1], ['שניים', 2], ['שתיים', 2], ['שני', 2], ['שתי', 2], ['שלושה', 3], ['שלוש', 3],
+  ['ארבעה', 4], ['ארבע', 4], ['חמישה', 5], ['חמש', 5], ['שישה', 6], ['שש', 6], ['שבעה', 7], ['שבע', 7], ['שמונה', 8],
+  ['תשעה', 9], ['תשע', 9], ['עשרה', 10], ['עשר', 10], ['תריסר', 12], ['עשרים', 20],
+  ['واحد', 1], ['اثنين', 2], ['اثنان', 2], ['تنين', 2], ['شخصين', 2], ['ثلاث', 3], ['ثلاثة', 3], ['تلات', 3], ['تلاتة', 3],
+  ['أربع', 4], ['أربعة', 4], ['اربع', 4], ['اربعة', 4], ['خمس', 5], ['خمسة', 5], ['ست', 6], ['ستة', 6], ['سبع', 7], ['سبعة', 7],
+  ['ثمانية', 8], ['تمانية', 8], ['تسع', 9], ['تسعة', 9], ['عشر', 10], ['عشرة', 10], ['عشرين', 20]
 ]);
+// Hebrew and Arabic join prepositions and "and" to a number: "לארבעה אנשים", "ולשניים", "لأربعة أشخاص".
+const JOINED_PREFIX = '(?:[ובלהמשכ]{1,2}|[وبلفك]{1,2})?';
 
 function mentionsNumber(text: string, value: number): boolean {
   const digits = text.replace(/[٠-٩]/gu, digit => String(digit.charCodeAt(0) - 0x0660));
   if (new RegExp(`(?<![\\d.,])${value}(?![\\d.,]\\d)`, 'u').test(digits)) return true;
-  return [...NUMBER_WORDS].some(([word, number]) => number === value && findMention(text, word));
+  const words = [...NUMBER_WORDS].filter(([, number]) => number === value).map(([word]) => escapeRegex(word));
+  return words.length > 0 &&
+    new RegExp(`(?<![\\p{L}\\p{N}])${JOINED_PREFIX}(?:${words.join('|')})(?![\\p{L}\\p{N}])`, 'iu').test(text.normalize('NFKC'));
+}
+
+const HEADCOUNT_NUMBER = `(?:[0-9]{1,3}|${[...NUMBER_WORDS.keys()].map(escapeRegex).join('|')})`;
+const HEADCOUNT_UNIT = '(?:people|persons?|guests?|servings?|attendees?|אנשים|איש|אורחים|מנות|סועדים|משתתפים|أشخاص|اشخاص|شخص|ضيوف|أفراد|افراد|حصص)';
+const HEADCOUNT_WITH_UNIT = new RegExp(`(?<![\\p{L}\\p{N}.,])${HEADCOUNT_NUMBER}\\s+${HEADCOUNT_UNIT}(?![\\p{L}\\p{N}])`, 'iu');
+const HEADCOUNT_ONLY = new RegExp([
+  '^(?:(?:actually|instead|בעצם|למעשה|في الواقع|بدل ذلك)[,،]?\\s+)?',
+  "(?:(?:make (?:it|(?:that|the) (?:party|event|meal|plan|recipe))|change (?:it|the plan)|(?:the )?(?:party|event|meal|plan) (?:is|will be)|it(?:['’]s| is| will be)|ה(?:מסיבה|ארוחה|אירוע|מתכון|תוכנית) (?:היא|הוא)|ת(?:שנה|עשה|עדכן)(?: (?:את זה|את התוכנית))?|الحفلة (?:هي|ستكون)|اجعلها|خليها)\\s+)?",
+  '(?<prefix>for\\s+|to\\s+|ל[-־]?\\s*|עבור\\s+|ل\\s*|لعدد\\s+)?',
+  `(?<amount>${HEADCOUNT_NUMBER})(?:\\s+(?<unit>${HEADCOUNT_UNIT}))?[.!?؟]*$`
+].join(''), 'iu');
+
+function normalizeHeadcountText(text: string): string {
+  return fold(text).replace(/ـ/gu, '')
+    .replace(/[٠-٩]/gu, digit => String(digit.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/gu, digit => String(digit.charCodeAt(0) - 0x06f0));
+}
+
+/** A bare correction to a plan's size, such as "Actually, make it for 6". */
+export function isHeadcountCorrection(message: string): boolean {
+  const match = HEADCOUNT_ONLY.exec(normalizeHeadcountText(message));
+  return Boolean(match?.groups?.prefix || match?.groups?.unit);
+}
+
+export function assertShoppingPlanHeadcount(message: string, quote: string, servings: number): void {
+  const wording = normalizeHeadcountText(assertUserQuote(message, quote, 'Resizing a shopping plan'));
+  const countPhrase = HEADCOUNT_WITH_UNIT.exec(wording)?.[0];
+  const shortPhrase = HEADCOUNT_ONLY.exec(wording)?.groups;
+  if (!(countPhrase && mentionsNumber(countPhrase, servings)) &&
+      !(shortPhrase?.amount && (shortPhrase.prefix || shortPhrase.unit) && mentionsNumber(shortPhrase.amount, servings))) {
+    throw new ValidationError('Quote the customer’s new headcount for this plan. Purchase amounts and budget limits do not specify a headcount.');
+  }
+}
+
+/**
+ * Recipe amounts are estimates, so near misses are corrected instead of refused: an "unspecified"
+ * unit or a zero amount means one package, and part of a counted item (0.5 onion) is one whole item.
+ * A container in Gemini's own plan ("1 bag of flour") is a count of sale packages: the customer
+ * did not ask for that container, and most catalog records never say "bag", so it would match nothing.
+ * Negative or missing amounts are still refused.
+ */
+function recipeQuantity(quantity: { amount: number; unit: string }): { amount: number; unit: string } {
+  if (!(quantity.amount >= 0)) return quantity;
+  if (quantity.unit === 'unspecified' || quantity.amount === 0) return { amount: 0, unit: 'unspecified' };
+  if (CONTAINER_UNITS.includes(quantity.unit)) return { amount: Math.ceil(quantity.amount), unit: 'pack' };
+  if (quantity.unit === 'units' && !Number.isInteger(quantity.amount)) return { amount: Math.ceil(quantity.amount), unit: 'units' };
+  return quantity;
 }
 
 export interface RecipeArgs {
@@ -225,8 +308,8 @@ export function validateRecipePlan(args: RecipeArgs, userMessage: string, covere
     if (names.has(fold(name))) throw new ValidationError(`${label} repeats an ingredient; combine the amounts instead.`);
     names.add(fold(name));
     const core = ingredient.coreSearchTerm.trim();
-    if (!HEBREW.test(core)) throw new ValidationError(`${label} coreSearchTerm must be a broad Hebrew product phrase.`);
-    const quantity = validateQuantity(ingredient.quantity, `${label} quantity`);
+    if (!HEBREW.test(core) || !isCatalogSearchTerm(core)) throw new ValidationError(`${label} coreSearchTerm must be the ingredient's Hebrew name, in Hebrew letters only.`);
+    const quantity = validateQuantity(recipeQuantity(ingredient.quantity), `${label} quantity`);
     const constraintEvidence: ConstraintEvidence[] = [];
     const ground = (values: string[] | undefined, type: 'REQUIREMENT' | 'PREFERENCE') => (values ?? []).map(value => {
       const written = findMention(requestText, value);
@@ -241,7 +324,7 @@ export function validateRecipePlan(args: RecipeArgs, userMessage: string, covere
     return {
       name,
       product: name,
-      searchTerms: [...new Set([core, ...(ingredient.searchTerms ?? []).map(term => term.trim()).filter(Boolean)])].slice(0, 6),
+      searchTerms: [...new Set([core, ...(ingredient.searchTerms ?? []).map(term => term.trim()).filter(Boolean).filter(isCatalogSearchTerm)])].slice(0, 6),
       requirements,
       preferences,
       constraintEvidence,
@@ -315,7 +398,7 @@ export function validateConstraintUpdate(item: CartItem, constraints: Constraint
 }
 
 export function validateSearchTerms(terms: string[]): string[] {
-  const cleaned = [...new Set(terms.map(term => term.trim()).filter(Boolean))];
+  const cleaned = [...new Set(terms.map(term => term.trim()).filter(Boolean).filter(isCatalogSearchTerm))];
   if (!cleaned.length || cleaned.length > 6) throw new ValidationError('Provide 1 to 6 search terms.');
   if (!cleaned.some(term => HEBREW.test(term))) throw new ValidationError('Search terms must include a Hebrew phrase; catalog names are Hebrew.');
   if (cleaned.some(term => term.length > 60)) throw new ValidationError('Search terms must be short product phrases.');

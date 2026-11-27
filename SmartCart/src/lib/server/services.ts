@@ -2,28 +2,26 @@ import type { CallModel } from '@engine/smartcart-matcher.mjs';
 import { createGeminiAgentModel, createGeminiMatcher, type AgentModel } from '@/lib/agent/gemini';
 import { createPooledAgentModel, createPooledMatcher, serverModelHealth } from '@/lib/agent/model-pool';
 import { getGeminiConfig, getServerEnv } from '@/lib/env';
+import type { TerminalTrace } from '@/lib/server/terminal-trace';
 import { ConfigurationError } from '@/lib/shared/errors';
 import { createLimiter, type Limiter } from '@/lib/shopping/limiter';
 
-/** Time one model gets for one agent turn before its backup takes over. */
+/** Time allowed for one agent model attempt. */
 const AGENT_ATTEMPT_TIMEOUT_MS = 30_000;
-/** Time one model gets for one batch of product checks before another model takes over. */
+/** Time allowed for one attempt to check a batch of products. */
 const MATCH_ATTEMPT_TIMEOUT_MS = 40_000;
 
-/** The agent model: GEMINI_MODEL, with GEMINI_BACKUP_MODELS taking over when it is busy. */
-export function getAgentModel(): AgentModel {
+/** Use the configured shopping model for agent turns, with timeout and trace reporting. */
+export function getAgentModel(trace?: TerminalTrace): AgentModel {
   const config = getGeminiConfig();
+  const model = createGeminiAgentModel(config);
   return createPooledAgentModel({
-    models: config.agentModels,
+    models: [config.model],
     health: serverModelHealth(),
     attemptTimeoutMs: AGENT_ATTEMPT_TIMEOUT_MS,
-    generate: (model, request) => createGeminiAgentModel({ ...config, agentModel: model }).generate(request)
+    trace,
+    generate: (_name, request) => model.generate(request)
   });
-}
-
-/** Saved checks are shared by the checking models, so the cache key names the whole set. */
-export function matchCacheModelLabel(matchModels: string[]): string {
-  return matchModels.join('+');
 }
 
 // One count of product-checking calls for the whole server process, shared by every
@@ -36,29 +34,38 @@ export function serverMatcherLimiter(): Limiter {
 }
 
 /**
- * The product matcher. Calls are spread across the checking models, with backups when
- * they are busy. Every call waits for a slot in the server-wide limit; each cart's
+ * The product matcher uses the same model as the agent. Every call waits for a slot
+ * in the server-wide limit. Each cart's
  * pipeline adds its own limit of 12 around it. Without Gemini configuration only cached
  * decisions can be reused.
  */
-export function getMatcher(signal?: AbortSignal): { callModel: CallModel | null; model: string } {
-  const env = getServerEnv();
+export function getMatcher(signal?: AbortSignal, trace?: TerminalTrace): { callModel: CallModel | null; model: string } {
+  const { GEMINI_MODEL: model } = getServerEnv();
   try {
     const config = getGeminiConfig();
     const callGemini = createPooledMatcher({
-      models: config.matchModels,
-      backups: config.matchBackupModels,
+      models: [config.model],
+      backups: [],
       health: serverModelHealth(),
       attemptTimeoutMs: MATCH_ATTEMPT_TIMEOUT_MS,
       signal,
-      call: model => createGeminiMatcher({ ...config, matchModel: model }, { signal, timeoutMs: MATCH_ATTEMPT_TIMEOUT_MS })
+      trace,
+      call: () => createGeminiMatcher(config, { signal, timeoutMs: MATCH_ATTEMPT_TIMEOUT_MS })
     });
     const limiter = serverMatcherLimiter();
-    return { callModel: args => limiter.run(() => callGemini(args), signal), model: matchCacheModelLabel(config.matchModels) };
+    return {
+      callModel: args => {
+        if (trace && !signal?.aborted && limiter.active === limiter.max) {
+          trace('model.matcher.queued', { active: limiter.active, waiting: limiter.waiting + 1, limit: limiter.max });
+        }
+        return limiter.run(() => callGemini(args), signal);
+      },
+      model: config.model
+    };
   } catch (error) {
     if (!(error instanceof ConfigurationError)) throw error;
-    const models = env.SMARTCART_MATCH_MODEL.split(',').map(model => model.trim()).filter(Boolean);
-    return { callModel: null, model: matchCacheModelLabel(models.length ? models : [env.GEMINI_MODEL]) };
+    trace?.('model.matcher.cache-only', { reason: error.code }, 'warn');
+    return { callModel: null, model };
   }
 }
 

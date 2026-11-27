@@ -1,4 +1,5 @@
 import { ZodError } from 'zod';
+import type { TerminalTrace } from '@/lib/server/terminal-trace';
 import { ForbiddenError, toPublicError, ValidationError } from '@/lib/shared/errors';
 
 export function json(data: unknown, init: ResponseInit = {}): Response {
@@ -8,12 +9,18 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(data), { ...init, headers });
 }
 
-export function errorResponse(error: unknown): Response {
+export function errorResponse(error: unknown, trace?: TerminalTrace): Response {
   const normalized = error instanceof ZodError
     ? new ValidationError(error.issues.slice(0, 5).map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; '))
     : error;
   const publicError = toPublicError(normalized);
-  if (publicError.status >= 500) console.error('[smartcart]', normalized instanceof Error ? normalized.message : normalized);
+  if (trace) {
+    const level = publicError.status >= 500 ? 'error' : 'warn';
+    trace('request.failed', { code: publicError.code, status: publicError.status }, level);
+    trace.detail('request failed', normalized, level);
+  } else if (publicError.status >= 500) {
+    console.error('[smartcart]', normalized instanceof Error ? normalized.message : normalized);
+  }
   return json({ error: { code: publicError.code, message: publicError.message } }, { status: publicError.status });
 }
 

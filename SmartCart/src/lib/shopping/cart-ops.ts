@@ -13,6 +13,7 @@ export type CartOperation =
       plan: { dish: string; servings: number; servingsSource: 'EXPLICIT' | 'ASSUMED'; requestText: string; notes?: string };
       ingredients: Array<NewItemFields & { name: string; optional: boolean; note?: string }>;
     }
+  | { op: 'resize_plan'; planId: string; servings: number; quantities: Array<{ itemId: string; quantity: Quantity }> }
   | { op: 'remove_items'; itemIds: string[] }
   | { op: 'set_quantity'; itemId: string; quantity: Quantity }
   | { op: 'set_constraints'; itemId: string; requirements: string[]; preferences: string[]; constraintEvidence: ConstraintEvidence[] }
@@ -135,6 +136,36 @@ export function applyCartOperations(cart: Cart, operations: CartOperation[], now
         const optional = recipe.ingredients.filter(entry => entry.optional).map(entry => entry.name);
         changes.push(`Added ${recipe.ingredients.length - optional.length} ingredients for ${recipe.dish} (${recipe.servings} servings${recipe.servingsSource === 'ASSUMED' ? ', assumed' : ''}).` +
           (optional.length ? ` Optional, not added: ${optional.join(', ')}.` : ''));
+        calculationAffected = true;
+        break;
+      }
+      case 'resize_plan': {
+        const plan = next.recipePlans.find(entry => entry.id === operation.planId);
+        if (!plan) throw new ValidationError(`No shopping plan has id ${operation.planId}. Call getCurrentCart for current plan ids.`);
+        const items = next.items.filter(item => item.origin.type === 'RECIPE' && item.origin.recipePlanId === plan.id);
+        if (!items.length) throw new ValidationError('This shopping plan has no current cart items to resize.');
+        const quantities = new Map(operation.quantities.map(entry => [entry.itemId, entry.quantity]));
+        if (quantities.size !== operation.quantities.length) throw new ValidationError('Provide each cart item id only once.');
+        if (quantities.size !== items.length || items.some(item => !quantities.has(item.id))) {
+          throw new ValidationError('Provide quantities for exactly the current cart item ids belonging to this shopping plan.');
+        }
+        next.items = next.items.map(item => {
+          const quantity = quantities.get(item.id);
+          return quantity ? { ...item, quantity } : item;
+        });
+        const { notes, ...previousPlan } = plan;
+        const resized: RecipePlan = {
+          ...previousPlan,
+          servings: operation.servings,
+          servingsSource: 'EXPLICIT',
+          ...(operation.servings === plan.servings && notes !== undefined ? { notes } : {}),
+          ingredients: plan.ingredients.map(ingredient => {
+            const quantity = ingredient.itemId ? quantities.get(ingredient.itemId) : undefined;
+            return quantity ? { ...ingredient, quantity } : ingredient;
+          })
+        };
+        next.recipePlans = next.recipePlans.map(entry => entry.id === plan.id ? resized : entry);
+        changes.push(`Updated ${plan.dish} from ${plan.servings} to ${operation.servings} servings.`);
         calculationAffected = true;
         break;
       }

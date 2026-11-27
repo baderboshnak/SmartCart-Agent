@@ -107,6 +107,27 @@ describe('voice session security', () => {
     assert.deepEqual(history.at(-1), { role: 'assistant', text: 'x'.repeat(600) });
   });
 
+  test('the voice model keeps to the customer\'s language and must name it for the agent', () => {
+    const config = buildLiveConfig();
+    const instruction = String(config.systemInstruction);
+    assert.match(instruction, /Always speak in the language of the customer's latest sentence\. Use only Hebrew, English or Arabic, never any other language/u);
+    assert.match(instruction, /Never translate it: Hebrew speech gives a Hebrew request/u);
+    assert.doesNotMatch(instruction, /such as "One moment\."/u, 'the filler phrase is not English-only');
+    const declaration = config.tools?.flatMap(tool => 'functionDeclarations' in tool ? tool.functionDeclarations ?? [] : [])[0];
+    const schema = declaration?.parametersJsonSchema as { properties: Record<string, { enum?: string[] }>; required: string[] };
+    assert.deepEqual(schema.properties.language?.enum, ['English', 'Hebrew', 'Arabic']);
+    assert.deepEqual(schema.required, ['request', 'language']);
+  });
+
+  test('when the voice model cannot tell the language, it uses the chat\'s language, else Hebrew', () => {
+    assert.match(String(buildLiveConfig().systemInstruction), /If you cannot tell which of the three the customer spoke, use Hebrew\.\n/u);
+    const messages: ChatMessage[] = [
+      { id: '1', role: 'user', kind: 'text', content: 'אני רוצה חלב', createdAt: new Date() },
+      { id: '2', role: 'user', kind: 'text', content: 'Actually, add 12 eggs too', createdAt: new Date() }
+    ];
+    assert.match(String(buildLiveConfig(messages).systemInstruction), /use English, the language of their recent messages\.\n/u);
+  });
+
   test('voice sessions are rate limited per shopping session', () => {
     const session = `session-${Math.random()}`;
     const start = Date.now();

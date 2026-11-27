@@ -1,0 +1,26 @@
+[
+  {
+    "id": "VOICE-HE-EGGS-MILK",
+    "language": "he",
+    "locale": "he-IL",
+    "request": "אני רוצה שתי חבילות של ביצים ושני בקבוקים של חלב.",
+    "answer": "מצאתי שתי חבילות ביצים ושני בקבוקי חלב ברמי לוי. המחיר הכולל הוא ארבעים ושניים שקלים ושמונים אגורות.",
+    "expectedFacts": "Two packs of eggs, two bottles of milk, Rami Levy, and a total of ₪42.80."
+  },
+  {
+    "id": "VOICE-EN-RICE",
+    "language": "en",
+    "locale": "en-US",
+    "request": "I'd like two bags of basmati rice.",
+    "answer": "I found two bags of basmati rice at Shufersal. The total is eighteen shekels.",
+    "expectedFacts": "Two bags of basmati rice, Shufersal, and a total of ₪18."
+  },
+  {
+    "id": "VOICE-AR-TUNA",
+    "language": "ar",
+    "locale": "ar-SA",
+    "request": "أريد علبتين من التونة بالماء.",
+    "answer": "وجدت علبتين من التونة بالماء في رامي ليفي. السعر الإجمالي اثنا عشر شيكلًا.",
+    "expectedFacts": "Two cans of tuna in water, Rami Levy, and a total of ₪12."
+  }
+]

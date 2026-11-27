@@ -17,7 +17,15 @@ const standIn: CallModel = async ({ prompt }) => {
   const product = JSON.parse(/^Product wanted: (.*)$/mu.exec(prompt)?.[1] ?? '""') as string;
   const heads: Record<string, RegExp> = { milk: /^חלב\s/u, eggs: /^ביצים/u, bread: /^לחם/u };
   const rows = JSON.parse(prompt.slice(prompt.lastIndexOf('\nProducts: ') + 11)) as Array<{ id: string; name: string }>;
-  return { decisions: rows.map(row => ({ id: row.id, identity: heads[product]?.test(row.name) ? 'MATCH' : 'NO_MATCH', requirementChecks: [], reason: 'benchmark stand-in', preferencesMet: [] })) };
+  return {
+    decisions: rows.map(row => {
+      const same = heads[product]?.test(row.name) === true;
+      return {
+        id: row.id, candidate: 'benchmark stand-in', identityEvidence: row.name, relation: same ? 'SAME_PRODUCT' : 'RELATED_DIFFERENT',
+        identity: same ? 'MATCH' : 'NO_MATCH', requirementChecks: [], preferencesMet: []
+      };
+    })
+  };
 };
 
 runScript(async () => {

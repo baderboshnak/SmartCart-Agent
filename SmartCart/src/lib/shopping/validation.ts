@@ -1,5 +1,5 @@
 import { exactStoreKey } from '@engine/smartcart-pipeline-context.mjs';
-import { interpretPackage, normalizeAmount, normalizeRequestedQuantity } from '@engine/smartcart-package.mjs';
+import { countsPackages, interpretPackage, normalizeAmount, normalizeRequestedQuantity } from '@engine/smartcart-package.mjs';
 import { corroborateRequirement, corroborateSizeRequirement, isKnownBrand } from '@engine/smartcart-requirement-evidence.mjs';
 import type { CatalogRecord, EngineItem } from '@engine/engine-types.mjs';
 import type { Basket, BasketResult } from '@engine/smartcart-basket-optimizer.mjs';
@@ -62,6 +62,8 @@ function verifyBasket(basket: Basket, items: EngineItem[], products: Map<string,
     let lineCents = 0;
     let lineTicks = 0;
     let linePackages = 0;
+    // "2 packs" or "3 units" of liter cartons is checked as a number of whole sale packages.
+    let packageCountLine = Boolean(requested);
     for (const offer of line.products) {
       lines++;
       const record = products.get(offer.productId);
@@ -79,13 +81,16 @@ function verifyBasket(basket: Basket, items: EngineItem[], products: Map<string,
       if (offer.identityStatus !== 'MATCH') fail(`${label}: product identity was not confirmed.`);
 
       // Recompute package reconciliation (for example, a 12-egg carton) from the catalog record.
-      const reconciled = interpretPackage(record, item, requested);
+      const plain = interpretPackage(record, { ...item, quantity: { amount: 0, unit: 'unspecified' } }, null);
+      const packagesWanted = Boolean(requested) && countsPackages(item.quantity?.unit, plain.packageAmount, record.package?.isWeighted);
+      if (!packagesWanted) packageCountLine = false;
+      const reconciled = packagesWanted ? plain : interpretPackage(record, item, requested);
       if (!reconciled.package || reconciled.package.quantity !== offer.package.quantity || reconciled.package.unit !== offer.package.unit) {
         fail(`${label}: package ${offer.package.quantity} ${offer.package.unit} does not match the catalog interpretation.`);
       }
       const amount = normalizeAmount(offer.package.quantity, offer.package.unit);
       if (!amount) fail(`${label}: unusable package quantity.`);
-      else if (requested && amount.family !== requested.family) fail(`${label}: package unit does not match the requested unit.`);
+      else if (requested && !packagesWanted && amount.family !== requested.family) fail(`${label}: package unit does not match the requested unit.`);
       else lineTicks += Math.round(amount.amountBase * 1000) * offer.packageCount;
 
       // Mandatory requirements: exactly one MET check each, independently re-corroborated.
@@ -111,7 +116,10 @@ function verifyBasket(basket: Basket, items: EngineItem[], products: Map<string,
 
     if (lineCents !== line.costCents || lineCents !== cents(line.totalPriceIls)) fail(`${label}: line total does not equal the sum of its products.`);
     if (linePackages !== line.packageCount) fail(`${label}: package count is inconsistent.`);
-    if (requested) {
+    if (requested && packageCountLine) {
+      if (linePackages < requested.amountBase) fail(`${label}: fewer packages than requested.`);
+      if (requested.maxAmountBase !== null && linePackages > requested.maxAmountBase) fail(`${label}: more packages than the requested maximum.`);
+    } else if (requested) {
       const minimum = Math.round(requested.amountBase * 1000);
       if (lineTicks < minimum) fail(`${label}: purchased quantity is below the requested amount.`);
       if (requested.maxAmountBase !== null && lineTicks > Math.round(requested.maxAmountBase * 1000)) fail(`${label}: purchased quantity exceeds the requested maximum.`);

@@ -11,6 +11,7 @@ import { runShoppingAgent } from '@/lib/agent/agent';
 import { getCart } from '@/lib/db/carts.repository';
 import { collections } from '@/lib/db/mongodb';
 import { createSession } from '@/lib/db/sessions.repository';
+import { parseLanguage } from '@/lib/i18n/language';
 import { serverModelHealth } from '@/lib/agent/model-pool';
 import { getAgentModel, getMatcher } from '@/lib/server/services';
 import { toCartView } from '@/lib/shopping/cart-view';
@@ -50,11 +51,13 @@ runScript(async () => {
             }
             if (message.serverContent?.outputTranscription?.text) report.spoken += message.serverContent.outputTranscription.text;
             for (const call of message.toolCall?.functionCalls ?? []) {
-              report.toolRequest = String((call.args as { request?: string })?.request ?? '');
+              const args = (call.args ?? {}) as { request?: unknown; language?: unknown };
+              report.toolRequest = String(args.request ?? '');
               report.normalized = normalizeSpokenRequest(report.toolRequest);
-              console.log(`[${elapsed()}] Live called ${call.name}: "${report.toolRequest}" -> agent receives "${report.normalized}"`);
+              const language = parseLanguage(args.language) ?? undefined;
+              console.log(`[${elapsed()}] Live called ${call.name} (language: ${language ?? 'not given'}): "${report.toolRequest}" -> agent receives "${report.normalized}"`);
               void runShoppingAgent({
-                db, sessionId: shoppingSession._id, message: report.normalized, via: 'voice',
+                db, sessionId: shoppingSession._id, message: report.normalized, via: 'voice', language,
                 model: getAgentModel(), matcher: getMatcher(), signal: new AbortController().signal,
                 emit: event => { if (event.type === 'tool.completed') console.log(`  [${elapsed()}] agent ${event.tool}: ${event.summary}`); }
               }).then(result => {

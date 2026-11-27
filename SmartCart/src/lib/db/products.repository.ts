@@ -1,5 +1,5 @@
 import type { Db, Filter } from 'mongodb';
-import { tokenize } from '@engine/smartcart-search.mjs';
+import { hebrewWordForms, tokenize } from '@engine/smartcart-search.mjs';
 import type { CatalogRecord } from '@engine/engine-types.mjs';
 import { collections } from '@/lib/db/mongodb';
 import { CATALOG_RECORD_PROJECTION, type ProductDocument } from '@/lib/catalog/normalize';
@@ -19,20 +19,30 @@ export function searchPhrases(terms: string[]): string[][] {
     .filter(words => words.length > 0);
 }
 
+const prefixClause = (prefix: string) => ({ searchTokens: { $regex: `^${escapeRegex(prefix)}` } });
+
+/** One search word: the word itself, plus its other Hebrew singular and plural forms. */
+function wordClause(word: string): Filter<ProductDocument> {
+  const { prefixes, exact } = hebrewWordForms(word);
+  const options: Filter<ProductDocument>[] = [
+    word.length >= 4 ? prefixClause(word) : { searchTokens: word },
+    ...prefixes.map(prefixClause),
+    ...(exact.length ? [{ searchTokens: { $in: exact } }] : [])
+  ];
+  return options.length === 1 ? options[0]! : { $or: options };
+}
+
 /**
  * Same semantics as engine/smartcart-search.mjs: every word of a phrase must equal a
- * name token, or prefix one when the word has at least 4 characters. Phrases are ORed.
+ * name token, or prefix one when the word has at least 4 characters, or be another
+ * singular or plural form of a Hebrew word. Phrases are ORed.
  */
 export function buildSearchFilter(phrases: string[][], storeKeys?: string[]): Filter<ProductDocument> {
   if (!phrases.length) throw new ValidationError('No usable search terms were provided.');
   if (phrases.length > MAX_PHRASES || phrases.some(words => words.length > MAX_WORDS_PER_PHRASE)) {
     throw new ValidationError(`Use at most ${MAX_PHRASES} search phrases of up to ${MAX_WORDS_PER_PHRASE} words.`);
   }
-  const clauses = phrases.map(words => ({
-    $and: words.map(word => word.length >= 4
-      ? { searchTokens: { $regex: `^${escapeRegex(word)}` } }
-      : { searchTokens: word })
-  }));
+  const clauses = phrases.map(words => ({ $and: words.map(wordClause) }));
   const filter: Filter<ProductDocument> = clauses.length === 1 ? clauses[0]! : { $or: clauses };
   return storeKeys?.length ? { $and: [filter, { storeKey: { $in: storeKeys } }] } : filter;
 }

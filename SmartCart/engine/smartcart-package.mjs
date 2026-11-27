@@ -1,8 +1,8 @@
 // Catalog names may describe the contents of a sale package more precisely
 // than its structured metadata. Only explicit quantity wording is evidence.
 const unitGroups = [
-  { family: 'mass', factor: 1, base: 'g', aliases: ['g', 'gr', 'gram', 'grams', 'ג', 'ג׳', 'גרם', 'גר', 'גר׳'] },
-  { family: 'mass', factor: 1000, base: 'g', aliases: ['kg', 'kgs', 'kilogram', 'kilograms', 'קג', 'ק"ג', 'קילוגרם'] },
+  { family: 'mass', factor: 1, base: 'g', aliases: ['g', 'gr', 'gram', 'grams', 'ג', 'ג׳', 'גרם', 'גרמים', 'גר', 'גר׳'] },
+  { family: 'mass', factor: 1000, base: 'g', aliases: ['kg', 'kgs', 'kilo', 'kilos', 'kilogram', 'kilograms', 'קג', 'ק"ג', 'קילו', 'קילוגרם', 'קילוגרמים'] },
   { family: 'volume', factor: 1, base: 'ml', aliases: ['ml', 'milliliter', 'milliliters', 'millilitre', 'millilitres', 'מל', 'מ"ל', 'מיליליטר'] },
   { family: 'volume', factor: 1000, base: 'ml', aliases: ['l', 'lt', 'liter', 'liters', 'litre', 'litres', 'ל', 'ל׳', 'לי', 'ליטר', 'ליטרים'] },
   { family: 'count', factor: 1, base: 'units', aliases: ['units', 'unit', 'piece', 'pieces', 'pcs', 'pc', 'each', 'יחידות', 'יחידה', 'יח', 'יחי', 'יח׳'] }
@@ -14,7 +14,10 @@ const containerGroups = [
   ['loaf', 'loaves', 'כיכר', 'כיכרות'],
   ['bag', 'bags', 'שקית', 'שקיות'],
   ['roll', 'rolls', 'גליל', 'גלילים'],
-  ['capsule', 'capsules', 'כמוסה', 'כמוסות', 'קפסולה', 'קפסולות']
+  ['capsule', 'capsules', 'כמוסה', 'כמוסות', 'קפסולה', 'קפסולות'],
+  // A sale package of any kind: "2 packs of pasta", "a box of tea", "שתי חבילות".
+  ['pack', 'packs', 'חבילה', 'חבילות', 'package', 'packages', 'packet', 'packets', 'box', 'boxes',
+    'אריזה', 'אריזות', 'קופסה', 'קופסא', 'קופסאות', 'باكيت', 'باكيتات']
 ];
 export const CONTAINER_UNITS = Object.freeze(containerGroups.map(([canonical]) => canonical));
 const countUnit = unitGroups.at(-1);
@@ -46,6 +49,19 @@ export function normalizeAmount(amount, unit) {
   const ticks = Math.round(amountBase * 1000);
   if (ticks <= 0 || !Number.isSafeInteger(ticks) || Math.abs(ticks - amountBase * 1000) > 1e-5) return null;
   return { family: definition.family, base: definition.base, amountBase: ticks / 1000 };
+}
+
+/**
+ * True when a requested count means a number of sale packages: "2 packs" of anything, or
+ * "3 units" of a product sold in fixed liter or gram packages ("3 milk" is three cartons).
+ * Weighed products and counted packages (a 12-egg carton) keep their usual meaning.
+ */
+export function countsPackages(requestedUnit, packageAmount, isWeighted) {
+  if (isWeighted || !packageAmount) return false;
+  if (containerType(requestedUnit) === 'pack') return true;
+  // "3 לחם" is three 750 g loaves and "2 חלב" two liter cartons. Fresh produce is mostly weighed,
+  // so it keeps its usual meaning; a fixed bag of produce is counted in bags, as the cart shows.
+  return parseUnit(requestedUnit) === countUnit && !containerType(requestedUnit) && packageAmount.family !== 'count';
 }
 
 export function normalizeRequestedQuantity(quantity) {

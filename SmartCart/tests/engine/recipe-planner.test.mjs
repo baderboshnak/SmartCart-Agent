@@ -350,7 +350,8 @@ test('routed mixed request builds a complete same-store pizza and 3% milk basket
       assert.equal(declaration.name, 'submit_product_matches');
       const candidates = JSON.parse(prompt.slice(prompt.lastIndexOf('\nProducts: ') + '\nProducts: '.length));
       return { decisions: candidates.map(candidate => ({
-        id: candidate.id, identity: 'MATCH', reason: 'Controlled fixture identity', preferencesMet: [],
+        id: candidate.id, candidate: 'Controlled fixture identity', identityEvidence: candidate.name,
+        relation: 'SAME_PRODUCT', identity: 'MATCH', preferencesMet: [],
         requirementChecks: item.requirements.map(requirement => ({
           requirement, kind: 'OTHER', result: 'MET', evidenceSource: 'NAME', evidence: candidate.name.match(/\d+%/u)?.[0] ?? ''
         }))

@@ -11,14 +11,20 @@ import {
 const check = (requirement, evidence, kind = 'OTHER', evidenceSource = 'NAME', result = 'MET') =>
   ({ requirement, kind, result, evidenceSource, evidence });
 
-const decision = (id, requirementChecks = [], preferencesMet = []) =>
-  ({ id, identity: 'MATCH', reason: 'Fixture product identity', requirementChecks, preferencesMet });
+// A confirmed identity, quoting the candidate's name as the real matcher must.
+const decision = (target, requirementChecks = [], preferencesMet = []) => {
+  const { _id, id = _id, name = '' } = typeof target === 'string' ? { id: target } : target;
+  return {
+    id, candidate: 'Fixture product', identityEvidence: name, relation: 'SAME_PRODUCT', identity: 'MATCH',
+    requirementChecks, preferencesMet
+  };
+};
 
 const candidateIds = prompt => JSON.parse(prompt.split('\nProducts: ').at(-1)).map(product => product.id);
 
 function validateOne(name, requirement, evidence) {
   const product = { _id: 'candidate', name };
-  const raw = { decisions: [decision(product._id, [check(requirement, evidence)])] };
+  const raw = { decisions: [decision(product, [check(requirement, evidence)])] };
   return validateMatchBatch(raw, [product], [], [requirement])[0];
 }
 
@@ -109,7 +115,7 @@ test('a per-bottle requirement measures each bottle and rejects a matching pack 
     { _id: 'ambiguous', name: 'Water 6 bottles 500 ml', package: { quantity: 500, unit: 'ml' } },
     { _id: 'hebrew', name: 'מים 6 בקבוקים × 500 מ״ל', package: { quantity: 3, unit: 'l' } }
   ];
-  const raw = { decisions: products.map(p => decision(p._id, [
+  const raw = { decisions: products.map(p => decision(p, [
     check('500 ml', p._id === 'hebrew' ? '500 מ״ל' : '500 ml', 'OTHER', p._id === 'singular' ? 'PACKAGE' : 'NAME')
   ])) };
   const result = validateMatchBatch(raw, products, [], item.requirements, { item });
@@ -129,7 +135,7 @@ test('an exact sale package size checks the full pack instead of a matching comp
     { _id: 'fourpack', name: 'Yogurt 4 × 500 g', package: { quantity: 500, unit: 'g' } },
     { _id: 'weighted', name: 'Yogurt 500 g', package: { quantity: 500, unit: 'g', isWeighted: true } }
   ];
-  const raw = { decisions: products.map(p => decision(p._id, [check('500 g', '500 g')])) };
+  const raw = { decisions: products.map(p => decision(p, [check('500 g', '500 g')])) };
   assert.deepEqual(validateMatchBatch(raw, products, [], item.requirements, { item }).map(d => d.status),
     ['MATCH', 'NO_MATCH', 'UNCERTAIN']);
 });
@@ -142,7 +148,7 @@ test('required Tnuva brand uses its labeled name or manufacturer and keeps missi
     { _id: 'unknown', name: 'נעם מוצרלה 23% מגורדת', manufacturer: null },
     { _id: 'wrong', name: 'גבינת מוצרלה מגורדת 300 גרם', manufacturer: { name: 'מחלבות גד' } }
   ];
-  const decisions = products.map(({ _id, name, manufacturer }) => decision(_id, [
+  const decisions = products.map(({ _id, name, manufacturer }) => decision({ _id, name }, [
     check('shredded', _id === 'shufersal' ? 'פתיתי מוצרלה' : 'מגורדת'),
     _id === 'wrong'
       ? check('Tnuva', manufacturer.name, 'BRAND', 'MANUFACTURER', 'CONTRADICTED')
@@ -161,7 +167,7 @@ test('a soft brand preference never affects eligibility and needs brand evidence
     { _id: 'other', name: 'חלב 3%', manufacturer: 'מחלבות יטבתה' }
   ];
   const parsed = validateMatchBatch({
-    decisions: products.map(({ _id }) => decision(_id, [check('3%', '3%')], ['Tnuva', '3%', 'invented']))
+    decisions: products.map(product => decision(product, [check('3%', '3%')], ['Tnuva', '3%', 'invented']))
   }, products, ['Tnuva'], ['3%']);
   assert.deepEqual(parsed.map(row => row.status), ['MATCH', 'MATCH']);
   assert.deepEqual(parsed.map(row => row.preferencesMet), [['Tnuva'], []]);
@@ -169,7 +175,7 @@ test('a soft brand preference never affects eligibility and needs brand evidence
 
 test('a known brand alias remains verifiable when the model calls it a general attribute', () => {
   const product = { _id: 'preferred', name: 'חלב תנובה 3%' };
-  const raw = { decisions: [decision(product._id, [check('Tnuva', 'תנובה')])] };
+  const raw = { decisions: [decision(product, [check('Tnuva', 'תנובה')])] };
   const item = { constraintEvidence: [{ value: 'Tnuva', kind: 'OTHER', type: 'REQUIREMENT' }] };
   const [matched] = validateMatchBatch(raw, [product], [], ['Tnuva'], { item });
   assert.equal(matched.status, 'MATCH');
@@ -177,7 +183,7 @@ test('a known brand alias remains verifiable when the model calls it a general a
 
   const unknown = { _id: 'unknown', name: 'חלב 3%', manufacturer: 'N/A' };
   const unknownRaw = { decisions: [
-    decision(unknown._id, [check('Tnuva', 'N/A', 'BRAND', 'MANUFACTURER', 'CONTRADICTED')])
+    decision(unknown, [check('Tnuva', 'N/A', 'BRAND', 'MANUFACTURER', 'CONTRADICTED')])
   ] };
   assert.equal(validateMatchBatch(unknownRaw, [unknown], [], ['Tnuva'])[0].status, 'UNCERTAIN');
 });
@@ -190,7 +196,7 @@ test('unverified or contradicted optional product attributes do not get preferen
     { _id: 'unlabeled', name: 'Plain chocolate' }
   ];
   const parsed = validateMatchBatch({
-    decisions: products.map(({ _id }) => decision(_id, [], preferences))
+    decisions: products.map(product => decision(product, [], preferences))
   }, products, preferences);
   assert.deepEqual(parsed.map(row => row.status), ['MATCH', 'MATCH', 'MATCH']);
   assert.deepEqual(parsed.map(row => row.preferencesMet), [preferences, [], []]);
@@ -212,7 +218,7 @@ test('English and Hebrew organic and free-range claims require an explicit produ
     { _id: 'unverified', name: '12ביצים רגילות סדרת חופש' }
   ];
   const parsed = validateMatchBatch({
-    decisions: products.map(({ _id }) => decision(_id, [], preferences))
+    decisions: products.map(product => decision(product, [], preferences))
   }, products, preferences);
   assert.deepEqual(parsed.map(row => row.preferencesMet), [preferences, []]);
 });
@@ -222,7 +228,7 @@ const milk = {
   quantity: { amount: 2, unit: 'l' }, searchTerms: ['חלב']
 };
 const milkWith = id => ({ _id: id, name: 'חלב תנובה 3%', pricing: { listedPriceIls: 7.2 } });
-const milkDecision = id => decision(id, [check('3%', '3%')], ['Tnuva']);
+const milkDecision = id => decision({ id, name: 'חלב תנובה 3%' }, [check('3%', '3%')], ['Tnuva']);
 
 test('retry covers omitted candidates, missing checks and invalid decisions without reusing valid candidates', async () => {
   const requested = [];

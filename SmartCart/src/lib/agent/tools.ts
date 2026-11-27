@@ -8,13 +8,17 @@ import { isCalculationFresh, modeLabel, selectBasket } from '@/lib/shopping/opti
 import type { CartPipeline, PipelineProgress } from '@/lib/shopping/pipeline';
 import { summarizeItemOptions } from '@/lib/shopping/quantity';
 import {
-  assertUserQuote, validateConstraintUpdate, validateDirectItems, validateQuantity, validateRecipePlan, validateSearchTerms
+  asksWhichVersion, assertShoppingPlanHeadcount, assertUserQuote, findMention, isHeadcountCorrection, validateConstraintUpdate, validateDirectItems, validateQuantity, validateRecipePlan,
+  validateSearchTerms
 } from '@/lib/shopping/request-items';
 import { exploreProducts } from '@/lib/shopping/search';
+import type { TerminalTrace } from '@/lib/server/terminal-trace';
 import { storeDisplayName } from '@/lib/catalog/normalize';
 import {
-  ClarificationArgsSchema, EmptyArgsSchema, ExplainArgsSchema, ItemIdsArgsSchema, SearchProductsArgsSchema,
-  SearchProductsDeclarationSchema, UpdateCartArgsSchema, UpdateCartDeclarationSchema, type CartOperationInput
+  AddItemsArgsSchema, AddItemsInputSchema, AddRecipeArgsSchema, AddRecipeInputSchema, ClarificationArgsSchema, ClearCartArgsSchema, EmptyArgsSchema,
+  ExplainArgsSchema, ItemIdsArgsSchema, RemoveItemsArgsSchema, ResizeShoppingPlanArgsSchema, SearchProductsArgsSchema, SearchProductsDeclarationSchema,
+  SelectStoreArgsSchema, SetBudgetArgsSchema, SetConstraintsArgsSchema, SetModeArgsSchema, SetQuantityArgsSchema,
+  SetSearchTermsArgsSchema, UpdateCartArgsSchema, UpdateCartDeclarationSchema, type CartOperationInput
 } from '@/lib/agent/schemas';
 import type { AgentTool, ToolExecutionContext, ToolResult } from '@/lib/agent/loop';
 import type { z } from 'zod';
@@ -23,7 +27,9 @@ export interface ShoppingToolContext {
   db: Db;
   sessionId: string;
   userMessage: { id: string; text: string };
+  hasPendingClarification?: boolean;
   pipeline: CartPipeline;
+  trace?: TerminalTrace;
   /** Pipeline progress is forwarded to the tool that is currently running. */
   setProgressTarget: (target: ((progress: PipelineProgress) => void) | null) => void;
   onCartSaved: (cart: Cart) => void;
@@ -56,9 +62,25 @@ function toCartOperation(input: CartOperationInput, cart: Cart, context: Shoppin
     case 'add_items':
       return { op: 'add_items', items: validateDirectItems({ requestText: input.requestText, items: input.items }, message, others), messageId: context.userMessage.id };
     case 'add_recipe': {
+      // A short headcount can also answer a question for a new plan already in progress.
+      if (!context.hasPendingClarification && isHeadcountCorrection(message)) {
+        const activePlans = cart.recipePlans.filter(plan =>
+          cart.items.some(item => item.origin.type === 'RECIPE' && item.origin.recipePlanId === plan.id)
+        );
+        if (activePlans.length === 1) {
+          throw new ValidationError(`This is a headcount correction for the existing plan ${activePlans[0]!.id}. Use resizeShoppingPlan with its current item IDs.`);
+        }
+        if (activePlans.length > 1) {
+          throw new ValidationError('This message only gives a headcount. Determine which existing plan it refers to before using resizeShoppingPlan. Ask for clarification if the plan is unclear.');
+        }
+      }
       const { plan, ingredients } = validateRecipePlan({ requestText: input.requestText, ...input.recipe }, message, others);
       return { op: 'add_recipe', plan, ingredients };
     }
+    case 'resize_plan':
+      assertShoppingPlanHeadcount(message, input.userQuote, input.servings);
+      return { op: 'resize_plan', planId: input.planId, servings: input.servings,
+        quantities: input.quantities.map(entry => ({ itemId: entry.itemId, quantity: validateQuantity(entry.quantity) })) };
     case 'remove_items':
       assertUserQuote(message, input.userQuote, 'Removing items');
       itemsById(cart, input.itemIds);
@@ -121,13 +143,67 @@ export async function calculateAndSave(context: ShoppingToolContext): Promise<Ca
   const cart = await getOrCreateCart(context.db, context.sessionId);
   if (!cart.items.length) return cart;
   const calculation = await context.pipeline.calculate(cart);
+  context.trace?.('cart.calculation.saving', { revision: cart.revision, status: calculation.status, calculationMs: calculation.durationMs });
   const saved = await saveCart(context.db, context.sessionId, cart.revision, { ...mutableFields(cart), calculation });
   context.onCartSaved(saved);
   return saved;
 }
 
+/** The cart-changing tools Gemini is given; updateCart is their hidden batched form. */
+export const CART_TOOL_NAMES = new Set([
+  'addItems', 'addRecipe', 'resizeShoppingPlan', 'removeItems', 'setQuantity', 'setConstraints', 'setSearchTerms',
+  'setShoppingMode', 'setBudget', 'selectStore', 'clearCart', 'updateCart'
+]);
+
+/**
+ * Wording that another cart call in the same Gemini turn covers ("under ₪50" for a setBudget next
+ * to an addRecipe), so it does not count as unassigned. Only wording from the message counts.
+ */
+function siblingQuotes(message: string, siblings: ToolExecutionContext['siblings']): string[] {
+  const values = (siblings ?? []).filter(call => CART_TOOL_NAMES.has(call.name)).flatMap(call => {
+    const operations = Array.isArray(call.args.operations) ? call.args.operations as Array<Record<string, unknown>> : [];
+    return [call.args, ...operations].flatMap(entry => [entry?.requestText, entry?.userQuote]);
+  });
+  return values.filter((value): value is string => typeof value === 'string' && Boolean(value.trim()) && message.includes(value.trim()));
+}
+
 export function createShoppingTools(context: ShoppingToolContext): AgentTool[] {
   const loadCart = () => getOrCreateCart(context.db, context.sessionId);
+
+  /** Validate, apply and save cart operations as one revision. Shared by every cart tool. */
+  async function applyOperations(inputs: CartOperationInput[], extraQuotes: string[] = []): Promise<ToolResult> {
+    const cart = await loadCart();
+    const quotes = inputs.flatMap(operation =>
+      'requestText' in operation ? [operation.requestText] : 'userQuote' in operation ? [operation.userQuote] : []);
+    const covered = [...context.coveredQuotes, ...extraQuotes, ...quotes];
+    const operations = inputs.map(operation => toCartOperation(operation, cart, context, covered));
+    const { cart: next, changes, calculationAffected, addedItemIds } = applyCartOperations(cart, operations);
+    context.trace?.('cart.edit.saving', { operations: operations.map(operation => operation.op).join(','), revision: cart.revision });
+    const saved = await saveCart(context.db, context.sessionId, cart.revision, mutableFields(next));
+    context.coveredQuotes.push(...quotes);
+    context.onCartSaved(saved);
+    return {
+      data: {
+        changes,
+        ...(addedItemIds.length ? { addedItemIds } : {}),
+        cart: summarizeCartForAgent(saved),
+        ...(calculationAffected && saved.items.length ? { next: 'Call optimizeBasket before quoting prices.' } : {})
+      },
+      summary: changes.join(' ').slice(0, 280)
+    };
+  }
+
+  /** One small tool per cart action: only the fields that action needs. */
+  const cartAction = <S extends z.ZodType>(definition: {
+    name: string; op: CartOperationInput['op']; description: string; argsSchema: S; declarationSchema?: z.ZodType; example?: string;
+    validationRecovery?: string;
+  }) => tool({
+    name: definition.name, label: 'Updating your cart', description: definition.description,
+    argsSchema: definition.argsSchema, declarationSchema: definition.declarationSchema, example: definition.example,
+    validationRecovery: definition.validationRecovery, timeoutMs: 20_000,
+    execute: (args, execution) => applyOperations([{ op: definition.op, ...(args as object) } as CartOperationInput],
+      siblingQuotes(context.userMessage.text, execution.siblings))
+  });
 
   return [
     tool({
@@ -142,33 +218,76 @@ export function createShoppingTools(context: ShoppingToolContext): AgentTool[] {
       }
     }),
 
+    // The batched form of the cart tools below. Gemini is not offered it (its one flat schema made
+    // the model misplace fields), but scripted tests and recorded conversations still call it.
     tool({
       name: 'updateCart',
       label: 'Updating your cart',
-      description: 'Change the saved cart: add items (add_items), add recipe ingredients (add_recipe), remove items, change a quantity, replace an item\'s requirements and preferences (set_constraints), refine Hebrew search terms, change the mode, set a budget, select a store or clear the cart. All operations in one call are applied together. After changes that affect prices, call optimizeBasket.',
+      description: 'Apply several cart operations together: add_items, add_recipe, remove_items, set_quantity, set_constraints, set_search_terms, set_mode, set_budget, select_store, clear.',
       argsSchema: UpdateCartArgsSchema,
       declarationSchema: UpdateCartDeclarationSchema,
+      hidden: true,
       timeoutMs: 20_000,
-      async execute(args) {
-        const cart = await loadCart();
-        const quotes = args.operations.flatMap(operation =>
-          'requestText' in operation ? [operation.requestText] : 'userQuote' in operation ? [operation.userQuote] : []);
-        const covered = [...context.coveredQuotes, ...quotes];
-        const operations = args.operations.map(operation => toCartOperation(operation, cart, context, covered));
-        const { cart: next, changes, calculationAffected, addedItemIds } = applyCartOperations(cart, operations);
-        const saved = await saveCart(context.db, context.sessionId, cart.revision, mutableFields(next));
-        context.coveredQuotes.push(...quotes);
-        context.onCartSaved(saved);
-        return {
-          data: {
-            changes,
-            ...(addedItemIds.length ? { addedItemIds } : {}),
-            cart: summarizeCartForAgent(saved),
-            ...(calculationAffected && saved.items.length ? { next: 'Call optimizeBasket before quoting prices.' } : {})
-          },
-          summary: changes.join(' ').slice(0, 280)
-        };
-      }
+      execute: (args, execution) => applyOperations(args.operations, siblingQuotes(context.userMessage.text, execution.siblings))
+    }),
+
+    cartAction({
+      name: 'addItems', op: 'add_items',
+      description: 'Add specific groceries the customer named in the latest message. Preserve stated purchase quantities. Use addRecipe when the customer delegates product selection or asks you to estimate how much to buy.',
+      validationRecovery: 'If the customer asked you to choose products or estimate amounts, switch to addRecipe. Record any headcount as servings and estimate the purchase amounts separately.',
+      argsSchema: AddItemsInputSchema, declarationSchema: AddItemsArgsSchema,
+      example: JSON.stringify({ requestText: '2 liters of 3% milk and bread', items: [
+        { sourceText: '2 liters of 3% milk', product: 'milk', coreSearchTerm: 'חלב',
+          constraintEvidence: [{ type: 'REQUIREMENT', kind: 'OTHER', sourceText: '3%' }], quantity: { amount: 2, unit: 'l' } },
+        { sourceText: 'bread', product: 'bread', coreSearchTerm: 'לחם', quantity: { amount: 0, unit: 'unspecified' } }
+      ] })
+    }),
+    cartAction({
+      name: 'addRecipe', op: 'add_recipe',
+      description: 'Start a new shopping plan for a meal, group, occasion or delegated shopping choice. Keep the headcount in servings, calculate the amounts to buy separately, preserve the customer’s requirements, and explain estimates. Then call optimizeBasket.',
+      validationRecovery: 'Fix the error before trying again. Use resizeShoppingPlan for a headcount correction to an existing plan. Ask for clarification when the plan or a required detail is unclear.',
+      argsSchema: AddRecipeInputSchema, declarationSchema: AddRecipeArgsSchema
+    }),
+    cartAction({
+      name: 'resizeShoppingPlan', op: 'resize_plan',
+      description: 'Adjust the headcount and quantities of an existing shopping plan when the customer corrects its size. Use the plan ID and item IDs already in the cart. Keep the existing products and requirements. Then call optimizeBasket.',
+      argsSchema: ResizeShoppingPlanArgsSchema,
+      validationRecovery: 'Use the existing plan ID and all of its current item IDs. Quote the customer’s new headcount, or ask for clarification if the plan or count is unclear.'
+    }),
+    cartAction({
+      name: 'removeItems', op: 'remove_items',
+      description: 'Remove cart items, by the itemId values in the current cart.', argsSchema: RemoveItemsArgsSchema
+    }),
+    cartAction({
+      name: 'setQuantity', op: 'set_quantity',
+      description: 'Change the amount of one cart item ("make it 2 liters").', argsSchema: SetQuantityArgsSchema
+    }),
+    cartAction({
+      name: 'setConstraints', op: 'set_constraints',
+      description: 'Replace one item\'s complete list of requirements and preferences ("only Tnuva", "preferably 3%"). Keep its other constraints.',
+      argsSchema: SetConstraintsArgsSchema
+    }),
+    cartAction({
+      name: 'setSearchTerms', op: 'set_search_terms',
+      description: 'Give one item better Hebrew catalog search terms when it has no candidates or no confirmed matches.',
+      argsSchema: SetSearchTermsArgsSchema
+    }),
+    cartAction({
+      name: 'setShoppingMode', op: 'set_mode',
+      description: 'Choose how baskets are compared: balanced (default), cheapest ("make it cheaper") or preferences-first.',
+      argsSchema: SetModeArgsSchema
+    }),
+    cartAction({
+      name: 'setBudget', op: 'set_budget',
+      description: 'Set the maximum basket total in shekels, or omit budgetIls to remove the budget.', argsSchema: SetBudgetArgsSchema
+    }),
+    cartAction({
+      name: 'selectStore', op: 'select_store',
+      description: 'Show the complete basket of one store (a storeKey from compareStores), or "" for the recommended store.',
+      argsSchema: SelectStoreArgsSchema
+    }),
+    cartAction({
+      name: 'clearCart', op: 'clear', description: 'Empty the cart.', argsSchema: ClearCartArgsSchema
     }),
 
     tool({
@@ -200,7 +319,10 @@ export function createShoppingTools(context: ShoppingToolContext): AgentTool[] {
           summary = items.map((item, index) => `${item.product}: ${outcomes[index]!.totalMatched} possible matches`).join(', ');
         }
         if (args.query?.length) {
+          context.trace?.('catalog.query.started', { phrases: args.query.length });
+          const queryStarted = Date.now();
           const found = await exploreProducts(context.db, args.query, { storeKeys: args.storeKeys });
+          context.trace?.('catalog.query.completed', { totalMatches: found.totalMatched, returned: found.results.length, durationMs: Date.now() - queryStarted });
           results.query = { phrases: args.query, totalMatched: found.totalMatched, results: found.results };
           summary = [summary, `"${args.query.join(', ')}": ${found.totalMatched} products`].filter(Boolean).join('; ');
         }
@@ -285,7 +407,7 @@ export function createShoppingTools(context: ShoppingToolContext): AgentTool[] {
       timeoutMs: 15_000,
       async execute() {
         const cart = await loadCart();
-        if (!isCalculationFresh(cart)) throw new ValidationError('The cart changed since the last calculation. Call optimizeBasket first.');
+        if (!isCalculationFresh(cart)) throw new ValidationError('There are no verified store comparisons for the current cart.');
         const summary = summarizeCalculationForAgent(cart) as Record<string, unknown>;
         return { data: { stores: summary.stores, alternatives: summary.alternatives, note: summary.note }, summary: 'Store comparison ready' };
       }
@@ -299,7 +421,7 @@ export function createShoppingTools(context: ShoppingToolContext): AgentTool[] {
       timeoutMs: 15_000,
       async execute(args) {
         const cart = await loadCart();
-        if (!isCalculationFresh(cart) || !cart.calculation) throw new ValidationError('No current verified calculation. Call optimizeBasket first.');
+        if (!isCalculationFresh(cart) || !cart.calculation) throw new ValidationError('There is no verified recommendation for the current cart.');
         const { calculation } = cart;
         const { basket, isRecommended } = selectBasket(cart);
         const result = calculation.result;
@@ -349,6 +471,15 @@ export function createShoppingTools(context: ShoppingToolContext): AgentTool[] {
       argsSchema: ClarificationArgsSchema,
       timeoutMs: 5_000,
       async execute(args) {
+        // The instructions already forbid "Which type of chicken?" for "I want chicken", but Gemini
+        // still asks it now and then. A question about items already in the cart stays allowed.
+        if (asksWhichVersion(args.question, context.userMessage.text)) {
+          const cart = await loadCart();
+          if (!cart.items.some(item => findMention(args.question, item.product))) {
+            throw new ValidationError('The customer named a product, so do not ask which type, kind, brand, size or flavor they want. ' +
+              'Add it as named with addItems and then call optimizeBasket; matching chooses among the catalog\'s versions. Ask only about a vague request.');
+          }
+        }
         const options = args.options ?? [];
         return { data: { asked: true }, summary: 'Asked a clarifying question', clarification: { question: args.question, options } };
       }

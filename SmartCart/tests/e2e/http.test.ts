@@ -133,6 +133,8 @@ describe('SmartCart over HTTP', { skip }, () => {
     assert.equal(malformed.status, 400);
     const badVia = await call('/api/agent', { method: 'POST', cookie, body: JSON.stringify({ message: 'milk', via: 'telepathy' }) });
     assert.equal(badVia.status, 400);
+    const badLanguage = await call('/api/agent', { method: 'POST', cookie, body: JSON.stringify({ message: 'milk', via: 'voice', language: 'Klingon' }) });
+    assert.equal(badLanguage.status, 400, 'only English, Hebrew or Arabic replies');
   });
 
   test('voice tokens require a session and a same-site request', async () => {

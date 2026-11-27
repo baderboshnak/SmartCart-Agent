@@ -22,6 +22,12 @@ export interface ModelTurn {
   /** The model content exactly as returned, including thought signatures. */
   content: Content;
   usage: TokenUsage;
+  /** Why Gemini stopped: STOP is normal; MAX_TOKENS, SAFETY or MALFORMED_FUNCTION_CALL explain an empty or cut reply. */
+  finishReason?: string;
+  /** Gemini's own explanation of an unusual stop, when it gives one. */
+  finishMessage?: string;
+  /** The model that produced this turn, when a pool of models chose it. */
+  model?: string;
 }
 
 export interface AgentModelRequest {
@@ -71,7 +77,9 @@ export function toModelTurn(response: GenerateContentResponse): ModelTurn {
       outputTokens: usage?.candidatesTokenCount ?? 0,
       thoughtTokens: usage?.thoughtsTokenCount ?? 0,
       totalTokens: usage?.totalTokenCount ?? 0
-    }
+    },
+    ...(candidate.finishReason ? { finishReason: candidate.finishReason } : {}),
+    ...(candidate.finishMessage ? { finishMessage: candidate.finishMessage } : {})
   };
 }
 
@@ -91,11 +99,11 @@ export function describeGeminiError(error: unknown): string {
 export function createGeminiAgentModel(config: GeminiConfig): AgentModel {
   const ai = client(config.apiKey);
   return {
-    name: config.agentModel,
+    name: config.model,
     async generate({ systemInstruction, contents, tools, toolMode, signal }) {
       try {
         const response = await ai.models.generateContent({
-          model: config.agentModel,
+          model: config.model,
           contents,
           config: {
             systemInstruction,
@@ -126,12 +134,15 @@ const matcherInstruction = (name: string) =>
  * The engine matcher's model call, implemented with generateContent and a forced
  * function call. A missing call returns {} so the engine retries with feedback.
  */
-export function createGeminiMatcher(config: GeminiConfig, options: { signal?: AbortSignal; timeoutMs?: number } = {}): CallModel {
+export function createGeminiMatcher(
+  config: GeminiConfig,
+  options: { signal?: AbortSignal; timeoutMs?: number; onUsage?: (usage: TokenUsage) => void } = {}
+): CallModel {
   const ai = client(config.apiKey);
   return async ({ prompt, declaration }) => {
     const timeout = AbortSignal.timeout(options.timeoutMs ?? 90_000);
     const response = await ai.models.generateContent({
-      model: config.matchModel,
+      model: config.model,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         systemInstruction: matcherInstruction(declaration.name),
@@ -140,6 +151,13 @@ export function createGeminiMatcher(config: GeminiConfig, options: { signal?: Ab
         temperature: 0,
         abortSignal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
       }
+    });
+    const usage = response.usageMetadata;
+    options.onUsage?.({
+      promptTokens: usage?.promptTokenCount ?? 0,
+      outputTokens: usage?.candidatesTokenCount ?? 0,
+      thoughtTokens: usage?.thoughtsTokenCount ?? 0,
+      totalTokens: usage?.totalTokenCount ?? 0
     });
     return response.functionCalls?.find(call => call.name === declaration.name)?.args ?? {};
   };

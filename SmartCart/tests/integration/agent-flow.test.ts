@@ -240,6 +240,40 @@ describe('agent end to end with MongoDB and a scripted Gemini', { skip: database
     assert.equal(stored?.messages[1]?.via, undefined, 'the answer is a normal assistant message');
   });
 
+  test('replies in the language of the customer\'s words, or of their earlier messages when a message has none', async () => {
+    const { session } = await createSession(testDb.db);
+    const hebrew = scriptedModel([textTurn('בודק')]);
+    await send(session._id, 'יש לכם חלב שיבולת שועל?', hebrew);
+    assert.match(hebrew.requests[0]!.systemInstruction, /# Reply language: Hebrew\n/u);
+
+    const noWords = scriptedModel([textTurn('')]);
+    const { result } = await send(session._id, '2', noWords);
+    assert.match(noWords.requests[0]!.systemInstruction, /# Reply language: Hebrew\n/u, 'keeps the conversation\'s language');
+    // Nothing was added, so the backup answer says it did not understand rather than "your cart is empty".
+    assert.equal(result.message.content, 'מצטער, לא הבנתי. מה תרצו לקנות?', 'the backup answer is in Hebrew too');
+  });
+
+  test('a spoken request answered after the backend recalculates stays in the language the voice model heard', async () => {
+    const { session } = await createSession(testDb.db);
+    const model = scriptedModel([
+      functionCallTurn([{ name: 'updateCart', args: { operations: [{ op: 'add_items', requestText: REQUEST_TEXT, items: ITEMS }] } }]),
+      textTurn('Added.'),
+      request => {
+        assert.match(request.systemInstruction, /# Reply language: Hebrew\n/u);
+        assert.match(String(request.contents.at(-1)?.parts?.[0]?.text), /^SYSTEM NOTE: .*written in Hebrew\.$/su, 'the last turn the model sees repeats the language');
+        return textTurn('');
+      }
+    ]);
+    const result = await runShoppingAgent({
+      db: testDb.db, sessionId: session._id, message: REQUEST, via: 'voice', language: 'he', model,
+      matcher: { callModel: matcher.callModel, model: 'fake-matcher' }, emit: () => {}, signal: new AbortController().signal, limits: { retryDelayMs: 5 }
+    });
+    assert.equal(model.requests.length, 3, 'the backend asked for a final answer after recalculating');
+    const lines = result.message.content.split('\n');
+    assert.match(lines[0]!, /: ₪67\.26 עבור 4 פריטים, עמידה בהעדפות: \d\/\d\.$/u, 'the backup summary is in Hebrew');
+    assert.equal(lines.at(-1), 'המחירים לקוחים מתמונת מצב של הקטלוג, ולא מהקופה בזמן אמת.');
+  });
+
   test('model failures end the run with a clear error and an unlocked session', async () => {
     const { session } = await createSession(testDb.db);
     const broken: AgentModel = { name: 'broken', generate: async () => { throw new Error('API key not valid. Please pass a valid API key.'); } };

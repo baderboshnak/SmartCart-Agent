@@ -3,9 +3,10 @@ import { z } from 'zod';
 import type { CallModel } from '@engine/smartcart-matcher.mjs';
 import { isKnownBrand } from '@engine/smartcart-requirement-evidence.mjs';
 import { getOrCreateCart, mutableFields, saveCart } from '@/lib/db/carts.repository';
-import { ConflictError, errorMessage, ValidationError } from '@/lib/shared/errors';
+import { ConflictError, errorMessage, toPublicError, ValidationError } from '@/lib/shared/errors';
 import { SHOPPING_MODES, type Cart, type ConstraintEvidence } from '@/lib/shared/types';
 import { QuantitySchema } from '@/lib/agent/schemas';
+import type { TerminalTrace } from '@/lib/server/terminal-trace';
 import { applyCartOperations, type CartOperation } from '@/lib/shopping/cart-ops';
 import { isCalculationFresh } from '@/lib/shopping/optimizer';
 import { CartPipeline } from '@/lib/shopping/pipeline';
@@ -89,25 +90,44 @@ function toOperations(cart: Cart, operation: UiCartOperation): CartOperation[] {
 export async function applyUiCartEdit(db: Db, sessionId: string, input: z.infer<typeof UiCartPatchSchema>, deps: {
   matcher: { callModel: CallModel | null; model: string };
   signal?: AbortSignal;
+  trace?: TerminalTrace;
 }): Promise<{ cart: Cart; recalculationError: string | null }> {
+  const { trace } = deps;
   const cart = await getOrCreateCart(db, sessionId);
+  trace?.('cart.loaded', { revision: cart.revision, itemCount: cart.items.length });
   if (cart.revision !== input.expectedRevision) throw new ConflictError();
   const operations = toOperations(cart, input.operation);
   let saved = cart;
   let needsCalculation = input.operation.op === 'recalculate';
   if (operations.length) {
     const { cart: next, calculationAffected } = applyCartOperations(cart, operations);
+    trace?.('edit.saving');
     saved = await saveCart(db, sessionId, cart.revision, mutableFields(next));
+    trace?.('edit.saved', { revision: saved.revision, itemCount: saved.items.length });
     needsCalculation = calculationAffected;
   }
-  if (!needsCalculation || !saved.items.length) return { cart: saved, recalculationError: null };
+  if (!needsCalculation || !saved.items.length) {
+    trace?.('recalculation.skipped', { reason: saved.items.length ? 'unchanged' : 'empty_cart' });
+    return { cart: saved, recalculationError: null };
+  }
   try {
-    const pipeline = new CartPipeline({ db, matcher: deps.matcher, signal: deps.signal });
+    trace?.('recalculation.started', { itemCount: saved.items.length });
+    const pipeline = new CartPipeline({ db, matcher: deps.matcher, signal: deps.signal, trace });
     const calculation = await pipeline.calculate(saved);
+    trace?.('recalculation.saving', {
+      status: calculation.status,
+      verified: calculation.verification.passed,
+      durationMs: calculation.durationMs
+    });
     saved = await saveCart(db, sessionId, saved.revision, { ...mutableFields(saved), calculation });
+    trace?.('recalculation.saved', { revision: saved.revision });
     return { cart: saved, recalculationError: null };
   } catch (error) {
-    if (error instanceof ConflictError) return { cart: await getOrCreateCart(db, sessionId), recalculationError: null };
+    if (error instanceof ConflictError) {
+      trace?.('recalculation.conflict', { attemptedRevision: saved.revision }, 'warn');
+      return { cart: await getOrCreateCart(db, sessionId), recalculationError: null };
+    }
+    trace?.('recalculation.failed', { code: toPublicError(error).code, revision: saved.revision }, 'error');
     return { cart: saved, recalculationError: errorMessage(error) };
   }
 }

@@ -259,15 +259,16 @@ export function summarizeCartForAgent(cart: Cart) {
       requirements: item.requirements,
       preferences: item.preferences,
       ...(item.choiceGroup ? { alternativeGroup: item.choiceGroup } : {}),
-      origin: item.origin.type === 'RECIPE' ? `recipe: ${item.origin.dish}` : 'direct request'
+      origin: item.origin.type === 'RECIPE' ? `recipe: ${item.origin.dish}` : 'direct request',
+      ...(item.origin.type === 'RECIPE' ? { planId: item.origin.recipePlanId } : {})
     })),
-    calculation: !cart.items.length ? 'EMPTY' : !calculation ? 'STALE_OR_MISSING: call optimizeBasket before quoting prices' : {
+    calculation: !cart.items.length ? 'EMPTY' : !calculation ? 'STALE_OR_MISSING' : {
       status: calculation.status,
       verificationPassed: calculation.verification.passed,
       shownBasket: basketForAgent(selection.basket, calculation.itemIds),
       shownBasketIsRecommended: selection.isRecommended
     },
-    recipePlans: cart.recipePlans.map(plan => ({ dish: plan.dish, servings: plan.servings, servingsSource: plan.servingsSource }))
+    recipePlans: cart.recipePlans.map(plan => ({ planId: plan.id, dish: plan.dish, servings: plan.servings, servingsSource: plan.servingsSource }))
   };
 }
 

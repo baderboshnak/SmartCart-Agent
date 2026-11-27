@@ -13,7 +13,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { interpretPackage, normalizeRequestedQuantity, parseUnit } from './smartcart-package.mjs';
+import { countsPackages, interpretPackage, normalizeRequestedQuantity, parseUnit } from './smartcart-package.mjs';
 import { assertItemContext, exactStoreKey, hasConfirmedRequirements, offerId } from './smartcart-pipeline-context.mjs';
 import { corroborateRequirement, corroborateSizeRequirement, isKnownBrand } from './smartcart-requirement-evidence.mjs';
 
@@ -61,21 +61,30 @@ function evaluateMatch(match, item, requested, hasSpecifiedQuantity, bound) {
   if (!Number.isSafeInteger(listedCents) || listedCents <= 0) {
     return skip('Missing or invalid listedPriceIls');
   }
+  // "2 packs" or "3 units" of liter cartons is a number of whole sale packages: read the plain
+  // sale package and buy that many, instead of comparing a count with liters or grams.
+  const plain = interpretPackage(p, { ...item, quantity: { amount: 0, unit: 'unspecified' } }, null);
+  const packagesWanted = hasSpecifiedQuantity &&
+    countsPackages(item.quantity?.unit, plain.packageAmount, plain.package?.isWeighted ?? p.package?.isWeighted);
   const { package: pkg, packageAmount: pkgAmount, originalPackage, packageInterpretation } =
-    interpretPackage(p, item, requested);
+    packagesWanted ? plain : interpretPackage(p, item, requested);
   const packageAudit = { originalPackage, packageInterpretation };
   if (!pkgAmount) return skip(packageInterpretation.reason, packageAudit);
-  if (hasSpecifiedQuantity && pkgAmount.family !== requested.family) {
+  const wanted = packagesWanted ? {
+    ...pkgAmount, amountBase: requested.amountBase * pkgAmount.amountBase,
+    maxAmountBase: requested.maxAmountBase === null ? null : requested.maxAmountBase * pkgAmount.amountBase
+  } : requested;
+  if (hasSpecifiedQuantity && pkgAmount.family !== wanted.family) {
     return skip('Requested quantity and package units are incompatible', packageAudit);
   }
   const isWeighted = pkg.isWeighted;
   if (isWeighted && !hasSpecifiedQuantity) {
     return skip('Weighted product needs an explicit requested weight or volume', packageAudit);
   }
-  const target = hasSpecifiedQuantity ? requested.amountBase : pkgAmount.amountBase;
+  const target = hasSpecifiedQuantity ? wanted.amountBase : pkgAmount.amountBase;
   const targetTicks = Math.round(target * 1000);
   const packageTicks = Math.round(pkgAmount.amountBase * 1000);
-  const maximum = requested?.maxAmountBase ?? null;
+  const maximum = wanted?.maxAmountBase ?? null;
   const maxTicks = maximum === null ? null : Math.round(maximum * 1000);
   if (!isWeighted && maxTicks !== null && packageTicks > maxTicks) {
     return skip('One fixed package exceeds the requested maximum quantity.', packageAudit);

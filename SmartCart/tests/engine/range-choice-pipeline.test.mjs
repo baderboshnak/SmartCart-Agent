@@ -54,7 +54,8 @@ async function runPipeline(text, items, offers) {
             };
           });
           return {
-            id: candidate.id, identity, reason: 'Controlled catalog evidence', requirementChecks,
+            id: candidate.id, candidate: 'Controlled catalog evidence', identityEvidence: candidate.name,
+            relation: identity === 'MATCH' ? 'SAME_PRODUCT' : 'RELATED_DIFFERENT', identity, requirementChecks,
             preferencesMet: identity === 'MATCH' && candidate.manufacturer === 'תנובה' ? item.preferences : []
           };
         })

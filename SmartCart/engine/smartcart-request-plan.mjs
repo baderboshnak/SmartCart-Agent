@@ -1,6 +1,7 @@
 // Side-effect-free validation of an extracted shopping plan against the exact
 // request wording. Shared by the CLI extractor and the web agent's cart tools.
 import { normalizeRequestedQuantity } from './smartcart-package.mjs';
+import { isCatalogSearchTerm } from './smartcart-search.mjs';
 import {
   assertProductPhrase, assertRequestedQuantity, REQUEST_UNITS, validateRequestEvidence
 } from './smartcart-request-coverage.mjs';
@@ -36,13 +37,14 @@ export function validateShoppingPlan(raw, userRequest) {
     assertProductPhrase(item, i);
     const coreSearchTerm = typeof item.coreSearchTerm === 'string'
       ? item.coreSearchTerm.trim() : '';
-    if (!coreSearchTerm || !/[֐-׿]/u.test(coreSearchTerm)) {
+    if (!coreSearchTerm || !/[֐-׿]/u.test(coreSearchTerm) || !isCatalogSearchTerm(coreSearchTerm)) {
       throw new Error(`items[${i}].coreSearchTerm must be a nonempty Hebrew product phrase.`);
     }
     if (!Array.isArray(item.searchTerms) || !item.searchTerms.every(term => typeof term === 'string')) {
       throw new Error(`items[${i}].searchTerms must be a string array.`);
     }
-    const searchTerms = [...new Set([coreSearchTerm, ...item.searchTerms.map(term => term.trim()).filter(Boolean)])];
+    // An extra phrase with Arabic letters can never match a Hebrew catalog name, so it is dropped.
+    const searchTerms = [...new Set([coreSearchTerm, ...item.searchTerms.map(term => term.trim()).filter(Boolean).filter(isCatalogSearchTerm)])];
     return { product: item.product.trim(), searchTerms, ...inventory[i] };
   });
   return { userRequest, items };

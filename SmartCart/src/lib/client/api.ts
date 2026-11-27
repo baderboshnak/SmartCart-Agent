@@ -1,4 +1,5 @@
 import type { AgentEvent } from '@/lib/agent/events';
+import type { Language } from '@/lib/i18n/language';
 import type { UiCartOperation } from '@/lib/shopping/cart-service';
 import type { CartView } from '@/lib/shopping/cart-view';
 
@@ -64,12 +65,12 @@ export const api = {
 };
 
 /** POST a message and read the agent's Server-Sent Events stream. */
-export async function streamAgent(message: string, onEvent: (event: AgentEvent) => void, signal?: AbortSignal, via?: 'voice'): Promise<void> {
+export async function streamAgent(message: string, onEvent: (event: AgentEvent) => void, signal?: AbortSignal, via?: 'voice', language?: Language, voiceId?: string): Promise<void> {
   const response = await fetch('/api/agent', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-    body: JSON.stringify({ message, ...(via ? { via } : {}) }),
+    body: JSON.stringify({ message, via, language, ...(via === 'voice' && voiceId ? { voiceId } : {}) }),
     signal
   });
   if (!response.ok || !response.body) {

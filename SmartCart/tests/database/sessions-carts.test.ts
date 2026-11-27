@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
-import type { CatalogRecord } from '@engine/engine-types.mjs';
+import type { CatalogRecord, EngineItem } from '@engine/engine-types.mjs';
+import type { MatchDecision } from '@engine/smartcart-matcher.mjs';
 import { countRecentRuns, createAgentRun, finishAgentRun, getAgentRun } from '@/lib/db/agent-runs.repository';
 import { getCart, getOrCreateCart, mutableFields, saveCart } from '@/lib/db/carts.repository';
-import { invalidateProducts } from '@/lib/db/match-cache.repository';
+import { invalidateProducts, saveCachedDecisions } from '@/lib/db/match-cache.repository';
 import { collections } from '@/lib/db/mongodb';
 import {
   acquireRunLock, appendMessages, authenticateSession, createSession, MAX_STORED_MESSAGES, releaseRunLock, updateSessionState
@@ -12,7 +13,7 @@ import { ConflictError, RateLimitError, UnauthorizedError } from '@/lib/shared/e
 import type { ChatMessage } from '@/lib/shared/types';
 import { applyCartOperations } from '@/lib/shopping/cart-ops';
 import { engineItemCore } from '@/lib/shopping/engine-items';
-import { matchItemCandidates } from '@/lib/shopping/matching';
+import { matchCacheKey, matchItemCandidates, matchItemKey, matchProductFingerprint } from '@/lib/shopping/matching';
 import { readSessionCookie, requireSession, sessionCookieHeader } from '@/lib/server/session-cookie';
 import { fixtureSearch, referenceItems } from '../helpers/fixtures';
 import { createFakeMatcher, MATCHING_CODES } from '../helpers/fake-models';
@@ -153,6 +154,32 @@ describe('sessions, carts and runs in MongoDB', { skip: databaseSkipReason }, ()
     const partial = await matchItemCandidates(engineItemCore(milk!), [changedProduct, ...candidates.slice(1)], { db: testDb.db, callModel: fifth.callModel, model: 'fake-model', batchSize: 20 });
     assert.equal(partial.cachedDecisions, candidates.length - 1, 'a changed product is re-evaluated');
     assert.ok(await invalidateProducts(testDb.db, [candidates[1]!._id]) >= 1);
+  });
+
+  test('decisions saved by the previous matcher are not reused, even under a current key', async () => {
+    const item: EngineItem = { product: 'חלב', searchTerms: ['חלב'], requirements: [], preferences: [], quantity: { amount: 0, unit: 'unspecified' }, constraintEvidence: [] };
+    const offers = fixtureSearch(['חלב']);
+    const condensed = offers.find(product => product.name === 'חלב מרוכז ממותק 370 גר')!;
+    const plain = offers.find(product => product.name === 'חלב תנובה 1% 1 לי')!;
+    // What matcher v2 saved for "אני רוצה חלב" before the fix.
+    const legacy = { id: condensed._id, status: 'MATCH', reason: 'Condensed milk is a form of milk.', identityStatus: 'MATCH', requirementChecks: [], preferencesMet: [] };
+    const now = new Date();
+    const saved = (itemKey: string) => ({
+      _id: matchCacheKey(itemKey, condensed), productId: condensed._id, itemKey, productHash: matchProductFingerprint(condensed),
+      model: 'fake-model-v2', decision: legacy as unknown as MatchDecision, createdAt: now, expiresAt: new Date(now.getTime() + 60_000)
+    });
+    const currentKey = matchItemKey(item, 'fake-model-v2');
+    // One copy under its own v2 key, and one under today's key, as if a version bump had been forgotten.
+    await saveCachedDecisions(testDb.db, [saved(matchItemKey(item, 'fake-model-v2', 'matcher-v2')), saved(currentKey)]);
+
+    const matcher = createFakeMatcher({ identity: (_product, candidate) => candidate.name === plain.name });
+    const outcome = await matchItemCandidates(item, [condensed, plain], { db: testDb.db, callModel: matcher.callModel, model: 'fake-model-v2' });
+    assert.equal(outcome.cachedDecisions, 0, 'the v2 decision is not reused');
+    assert.equal(matcher.stats.candidates, 2, 'condensed milk is checked again');
+    assert.deepEqual(outcome.results.matches.map(row => row.product._id), [plain._id]);
+    assert.deepEqual(outcome.results.rejected.map(row => row.product._id), [condensed._id]);
+    const stored = await collections.matchCache(testDb.db).findOne({ _id: matchCacheKey(currentKey, condensed) });
+    assert.equal(stored?.decision.relation, 'RELATED_DIFFERENT', 'the new decision replaced the legacy one');
   });
 
   test('a catalog refresh with new prices and dates reuses saved checks; a new name, manufacturer or package is checked again', async () => {

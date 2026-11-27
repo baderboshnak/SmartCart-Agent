@@ -15,6 +15,7 @@ import { CartTabs } from '@/components/cart/cart-tabs';
 import { api, ApiError, streamAgent, type ActivityStep, type CartView, type ClientMessage, type UiCartOperation } from '@/lib/client/api';
 import { count, fill, formatIls } from '@/lib/client/format';
 import { VoiceSession, voiceSupported, type VoiceState } from '@/lib/client/voice-session';
+import { conversationLanguage, type Language } from '@/lib/i18n/language';
 import { messages as i18n } from '@/lib/i18n/messages';
 import { VoiceBar } from '@/components/chat/voice-bar';
 
@@ -71,7 +72,7 @@ export function SmartCartApp() {
   };
 
   /** Run the agent for one message. Resolves with the answer text (used by voice to speak it). */
-  const runAgent = useCallback(async (text: string, via?: 'voice'): Promise<string> => {
+  const runAgent = useCallback(async (text: string, via?: 'voice', language?: Language, voiceId?: string): Promise<string> => {
     if (!text.trim()) return '';
     if (runningRef.current) return t.voiceBusy;
     runningRef.current = true;
@@ -116,7 +117,7 @@ export function SmartCartApp() {
             setChat(current => [...current, { id: localId('error'), role: 'assistant', kind: 'error', content: event.error.message, createdAt: new Date().toISOString(), steps: stepsRef.current }]);
             break;
         }
-      }, controller.signal, via);
+      }, controller.signal, via, language, voiceId);
       if (!finished) throw new Error('The connection closed before SmartCart finished.');
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -155,7 +156,7 @@ export function SmartCartApp() {
         if (state === 'idle' && voiceRef.current === session) voiceRef.current = null;
       },
       onCaption: setCaption,
-      onToolRequest: request => runAgent(request, 'voice'),
+      onToolRequest: (request, language, voiceId) => runAgent(request, 'voice', language, voiceId),
       onExchangeComplete: ({ userText, assistantText, usedTool }) => {
         // Exchanges that reached the agent are already in the chat (request and verified answer).
         if (usedTool || (!userText && !assistantText)) return;
@@ -284,7 +285,8 @@ export function SmartCartApp() {
                         <button
                           key={text}
                           type="button"
-                          onClick={() => send(text)}
+                          // The button text is English UI copy; reply in the language the customer has been using.
+                          onClick={() => void runAgent(text, undefined, conversationLanguage(chat) ?? undefined)}
                           className="inline-flex shrink-0 items-center gap-2 rounded-full border border-border/80 bg-card px-4 py-2 text-sm font-semibold shadow-soft transition hover:-translate-y-px hover:border-primary/30 hover:text-primary"
                         >
                           <Icon className="size-4 text-primary" />{text}

@@ -6,6 +6,11 @@ const projectRoot = process.cwd();
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  logging: {
+    browserToTerminal: false,
+    // SmartCart summarizes these routes and records the individual steps in its own log.
+    incomingRequests: { ignore: [/^\/api\/(?:agent|cart|sessions|voice\/(?:token|trace))(?:\?|$)/u] }
+  },
   turbopack: { root: projectRoot },
   outputFileTracingRoot: projectRoot,
   // Server-only SDKs stay as Node.js modules instead of being bundled.

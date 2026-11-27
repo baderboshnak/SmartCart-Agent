@@ -100,8 +100,9 @@ function catalogModel(item) {
             evidenceSource: evidence ? evidenceSource : 'NONE', evidence: evidence ?? '' };
         });
         return {
-          id: candidate.id, identity: testedOffer ? 'MATCH' : 'UNCERTAIN',
-          requirementChecks, reason: 'Controlled catalog fixture',
+          id: candidate.id, candidate: 'Controlled catalog fixture', identityEvidence: candidate.name,
+          relation: testedOffer ? 'SAME_PRODUCT' : 'UNCLEAR', identity: testedOffer ? 'MATCH' : 'UNCERTAIN',
+          requirementChecks,
           preferencesMet: testedOffer && confirmedTnuva ? item.preferences : []
         };
       })
@@ -313,7 +314,7 @@ test('six 500 ml bottles cannot be replaced by a cheaper pack with the same tota
   const matches = await matchProducts({
     item: plan.items[0], products, context: createItemContext(plan, 0),
     callModel: async () => ({ decisions: products.map(product => ({
-      id: product._id, identity: 'MATCH', reason: 'Controlled fixture',
+      id: product._id, candidate: 'Controlled fixture', identityEvidence: product.name, relation: 'SAME_PRODUCT', identity: 'MATCH',
       requirementChecks: [{ requirement: '500 ml', kind: 'OTHER', result: 'MET',
         evidence: product.name, evidenceSource: 'NAME' }],
       preferencesMet: []

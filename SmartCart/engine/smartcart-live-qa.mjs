@@ -58,7 +58,7 @@ const cases = [
 
 async function runLiveChecks() {
   const [
-    { understandShoppingRequest, callLiveFunction }, { normalizeAmount },
+    { understandShoppingRequest, callShoppingFunction, SHOPPING_MODEL }, { normalizeAmount },
     { matchProducts }, { buildCatalog, searchCatalog }, { createItemContext },
     { buildQuantityPriceOptions }, { optimizeBaskets }
   ] = await Promise.all([
@@ -84,7 +84,7 @@ async function runLiveChecks() {
       report.calls++;
       report.promptUtf8Bytes += Buffer.byteLength(args.prompt, 'utf8');
       const before = performance.now();
-      try { return await callLiveFunction(args); }
+      try { return await callShoppingFunction(args); }
       finally { report.apiMilliseconds += elapsed(before); }
     };
     try {
@@ -147,7 +147,7 @@ async function runLiveChecks() {
     report.totalMilliseconds = elapsed(start);
     console.log(JSON.stringify(report));
   }
-  console.log(JSON.stringify({ passed: cases.length - failed, failed, realGeminiCalls: true }));
+  console.log(JSON.stringify({ passed: cases.length - failed, failed, realGeminiCalls: true, model: SHOPPING_MODEL }));
   if (failed) process.exitCode = 1;
 }
 

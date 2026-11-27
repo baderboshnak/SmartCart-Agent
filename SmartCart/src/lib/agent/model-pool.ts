@@ -2,6 +2,7 @@ import type { Content, Part } from '@google/genai';
 import type { CallModel } from '@engine/smartcart-matcher.mjs';
 import type { AgentModel, AgentModelRequest, ModelTurn } from '@/lib/agent/gemini';
 import { raceAbort, timeoutSignal } from '@/lib/agent/loop';
+import { formatDuration, type TerminalTrace } from '@/lib/server/terminal-trace';
 import { errorMessage, ModelError } from '@/lib/shared/errors';
 
 /**
@@ -66,14 +67,27 @@ export function serverModelHealth(): ModelHealth {
   return (globalStore.__smartcartModelHealth ??= new ModelHealth());
 }
 
+function providerStatus(error: unknown): number {
+  const cause = (error as { cause?: unknown })?.cause ?? error;
+  return Number((cause as { status?: unknown })?.status ?? (error as { status?: unknown })?.status);
+}
+
+/** "503 The model is overloaded..." with Gemini's own words, for the debug log. */
+export function failureSummary(error: unknown, maxChars = 300): string {
+  const status = providerStatus(error);
+  const cause = (error as { cause?: unknown })?.cause;
+  const raw = errorMessage(cause instanceof Error ? cause : error);
+  const detail = /"message"\s*:\s*"([^"]+)"/u.exec(raw)?.[1] ?? raw;
+  return `${status ? `${status} ` : ''}${detail}`.slice(0, maxChars);
+}
+
 /**
  * How long to rest a model after this failure, or null when the request itself is the
  * problem and another model would fail the same way.
  */
 export function restAfter(error: unknown, timedOut = false): number | null {
   if (timedOut) return REST_AFTER_BUSY_MS;
-  const cause = (error as { cause?: unknown })?.cause ?? error;
-  const status = Number((cause as { status?: unknown })?.status ?? (error as { status?: unknown })?.status);
+  const status = providerStatus(error);
   if (status === 404 || status === 403) return REST_AFTER_MISSING_MS;
   if ([408, 429, 500, 502, 503, 504].includes(status)) return REST_AFTER_BUSY_MS;
   if (/overloaded|high demand|unavailable|rate limit|resource[ _]exhausted|timed? ?out|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/iu.test(errorMessage(error))) {
@@ -90,15 +104,43 @@ export function allBusy(lastError: unknown): ModelError {
   return new ModelError('All available Gemini models are overloaded or temporarily unavailable. Please try again in a minute.', { cause: lastError });
 }
 
+interface ModelAttempt {
+  role: 'agent' | 'matcher';
+  model: string;
+  modelCall: number;
+  attempt: number;
+  fallback: boolean;
+}
+
 /** One attempt on one model, with its own time limit inside the caller's signal. */
-async function attempt<T>(model: string, run: (signal: AbortSignal) => Promise<T>, timeoutMs: number, outer?: AbortSignal) {
-  const timeout = timeoutSignal(timeoutMs, `${model} timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+async function attempt<T>(details: ModelAttempt, run: (signal: AbortSignal) => Promise<T>, timeoutMs: number, outer?: AbortSignal, trace?: TerminalTrace) {
+  const started = Date.now();
+  trace?.('model.attempt.started', { ...details, timeoutMs });
+  const timeout = timeoutSignal(timeoutMs, `${details.model} timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
   const signal = outer ? AbortSignal.any([outer, timeout.signal]) : timeout.signal;
   try {
-    return { ok: true as const, value: await raceAbort(run(signal), signal) };
+    const value = await raceAbort(run(signal), signal);
+    trace?.('model.attempt.succeeded', { ...details, durationMs: Date.now() - started });
+    return { ok: true as const, value };
   } catch (error) {
-    if (outer?.aborted) throw error;
-    return { ok: false as const, error: timeout.signal.aborted ? timeout.signal.reason : error, timedOut: timeout.signal.aborted };
+    const durationMs = Date.now() - started;
+    if (outer?.aborted) {
+      const reason = outer.reason instanceof Error && outer.reason.name === 'TimeoutError' ? 'deadline' : 'signal_aborted';
+      trace?.('model.attempt.cancelled', { ...details, reason, durationMs }, 'warn');
+      throw error;
+    }
+    const timedOut = timeout.signal.aborted;
+    const failure = timedOut ? timeout.signal.reason : error;
+    const restMs = restAfter(failure, timedOut);
+    const reason = timedOut ? 'timeout'
+      : restMs === REST_AFTER_MISSING_MS ? 'model_unavailable'
+      : restMs === REST_AFTER_BUSY_MS ? 'temporarily_unavailable'
+      : 'request_failed';
+    trace?.('model.attempt.failed', {
+      ...details, reason, providerStatus: timedOut ? undefined : providerStatus(failure) || undefined, restMs, durationMs
+    }, 'warn');
+    trace?.detail(`Gemini ${details.role === 'agent' ? 'agent' : 'product-check'} call to ${details.model} failed (${reason}) after ${formatDuration(durationMs)}`, failure, 'warn');
+    return { ok: false as const, error: failure, restMs };
   } finally {
     timeout.clear();
   }
@@ -133,32 +175,39 @@ export function createPooledAgentModel(options: {
   generate: (model: string, request: AgentModelRequest) => Promise<ModelTurn>;
   attemptTimeoutMs?: number;
   maxModelsPerTurn?: number;
+  trace?: TerminalTrace;
 }): PooledAgentModel {
   if (!options.models.length) throw new RangeError('The agent needs at least one model.');
   const turnsBy: string[] = [];
   const [main, ...backups] = options.models;
+  let modelCalls = 0;
   return {
     name: backups.length ? `${main} (+${backups.length} backups)` : main!,
     turnsBy,
     async generate(request) {
+      const modelCall = ++modelCalls;
+      const order = options.health.order(options.models).slice(0, options.maxModelsPerTurn ?? 3);
       let lastError: unknown = null;
-      for (const model of options.health.order(options.models).slice(0, options.maxModelsPerTurn ?? 3)) {
+      const failures: Record<string, string> = {};
+      for (const [index, model] of order.entries()) {
         request.signal.throwIfAborted();
         const otherProducers = turnsBy.some(producer => producer !== model);
         const contents = otherProducers ? neutralizeSignatures(request.contents) : request.contents;
-        const result = await attempt(model, signal => options.generate(model, { ...request, contents, signal }),
-          options.attemptTimeoutMs ?? 30_000, request.signal);
+        const result = await attempt({ role: 'agent', model, modelCall, attempt: index + 1, fallback: index > 0 || model !== main },
+          signal => options.generate(model, { ...request, contents, signal }), options.attemptTimeoutMs ?? 30_000, request.signal, options.trace);
         if (result.ok) {
           turnsBy.push(model);
           options.health.recordAnswer(model);
-          return result.value;
+          return { ...result.value, model };
         }
         options.health.recordFailure(model, result.error);
-        const rest = restAfter(result.error, result.timedOut);
-        if (rest === null) throw result.error;
-        options.health.rest(model, rest);
+        failures[model] = failureSummary(result.error);
+        if (result.restMs === null) throw result.error;
+        options.health.rest(model, result.restMs);
         lastError = result.error;
       }
+      options.trace?.('model.pool.exhausted', { role: 'agent', modelCall, attempts: order.length }, 'warn');
+      options.trace?.detail('no Gemini model could answer this agent turn', failures, 'error');
       throw allBusy(lastError);
     }
   };
@@ -176,6 +225,7 @@ export function createPooledMatcher(options: {
   attemptTimeoutMs?: number;
   maxModelsPerCall?: number;
   signal?: AbortSignal;
+  trace?: TerminalTrace;
   /** Called with the model that answered each call. */
   onAnswered?: (model: string) => void;
 }): CallModel {
@@ -187,7 +237,9 @@ export function createPooledMatcher(options: {
     return call;
   };
   let next = 0;
+  let modelCalls = 0;
   return async args => {
+    const modelCall = ++modelCalls;
     const ready = options.models.filter(model => !options.health.isResting(model));
     const start = ready.length ? next++ % ready.length : 0;
     const rotated = [...ready.slice(start), ...ready.slice(0, start)];
@@ -198,20 +250,24 @@ export function createPooledMatcher(options: {
       ...options.health.order(all)
     ])].slice(0, options.maxModelsPerCall ?? 4);
     let lastError: unknown = null;
-    for (const model of order) {
+    const failures: Record<string, string> = {};
+    for (const [index, model] of order.entries()) {
       options.signal?.throwIfAborted();
-      const result = await attempt(model, () => callFor(model)(args), options.attemptTimeoutMs ?? 60_000, options.signal);
+      const result = await attempt({ role: 'matcher', model, modelCall, attempt: index + 1, fallback: index > 0 || !options.models.includes(model) },
+        () => callFor(model)(args), options.attemptTimeoutMs ?? 60_000, options.signal, options.trace);
       if (result.ok) {
         options.health.recordAnswer(model);
         options.onAnswered?.(model);
         return result.value;
       }
       options.health.recordFailure(model, result.error);
-      const rest = restAfter(result.error, result.timedOut);
-      if (rest === null) throw result.error;
-      options.health.rest(model, rest);
+      failures[model] = failureSummary(result.error);
+      if (result.restMs === null) throw result.error;
+      options.health.rest(model, result.restMs);
       lastError = result.error;
     }
+    options.trace?.('model.pool.exhausted', { role: 'matcher', modelCall, attempts: order.length }, 'warn');
+    options.trace?.detail('no Gemini model could check this batch of products', failures, 'error');
     throw allBusy(lastError);
   };
 }

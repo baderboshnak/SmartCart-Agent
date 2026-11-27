@@ -7,7 +7,7 @@ export type ShoppingMode = BasketMode;
 export const SHOPPING_MODES = ['balanced', 'cheapest', 'preferences-first'] as const satisfies readonly ShoppingMode[];
 export const DEFAULT_MAX_PREMIUM_PCT = 15;
 
-export const QUANTITY_UNITS = ['l', 'ml', 'kg', 'g', 'units', 'unspecified', 'bottle', 'can', 'loaf', 'bag', 'roll', 'capsule'] as const;
+export const QUANTITY_UNITS = ['l', 'ml', 'kg', 'g', 'units', 'unspecified', 'bottle', 'can', 'loaf', 'bag', 'roll', 'capsule', 'pack'] as const;
 export type QuantityUnit = (typeof QUANTITY_UNITS)[number];
 export type Quantity = EngineQuantity;
 

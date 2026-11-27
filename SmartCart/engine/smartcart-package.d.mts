@@ -11,6 +11,8 @@ export function parseUnit(value: unknown): { family: string; factor: number; bas
 export function containerType(value: unknown): string | undefined;
 export function normalizeAmount(amount: unknown, unit: unknown): NormalizedAmount | null;
 export function normalizeRequestedQuantity(quantity: unknown): (NormalizedAmount & { maxAmountBase: number | null }) | null;
+/** A requested count that means a number of sale packages: "2 packs", or "3 units" of liter or gram packages. */
+export function countsPackages(requestedUnit: unknown, packageAmount: NormalizedAmount | null | undefined, isWeighted: unknown): boolean;
 export function interpretPackage(product: unknown, item: unknown, requested: unknown): {
   originalPackage: Record<string, unknown> | null;
   packageInterpretation: PackageInterpretation;
